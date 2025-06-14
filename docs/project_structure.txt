@@ -1,0 +1,30 @@
+nfl-gaming-platform/
+├── etl/                          # Python ETL pipeline
+│   ├── pyproject.toml           # uv dependencies
+│   ├── uv.lock                  # Auto-generated lockfile
+│   ├── .python-version          # Python 3.11
+│   ├── .env                     # Local environment (DATABASE_URL)
+│   ├── .env.example             # Template for environment
+│   ├── railway.toml             # Railway deployment config
+│   ├── nixpacks.toml            # uv installation for Railway
+│   ├── mvp_pipeline.py          # Main ETL logic (3,500+ lines)
+│   ├── run_etl.py               # ETL runner script
+│   ├── test_connection.py       # Database & nfl_data_py tests
+│   ├── validate_data.py         # Post-ETL data validation
+│   └── .gitignore               # Ignore .env, __pycache__, etc.
+├── backend/                     # Future: TypeScript game server
+├── frontend/                    # Future: React racing game
+├── .git/                        # Git repository
+└── README.md                    # Project documentation
+
+# Key files you'll create:
+# 1. pyproject.toml - Python dependencies
+# 2. .env - Your Railway DATABASE_URL
+# 3. mvp_pipeline.py - The ETL logic (copy from artifact)
+# 4. run_etl.py - Simple runner script
+# 5. test_connection.py - Validation script
+
+# After successful ETL run, Railway database will have:
+# - players table (~3,500 records, id = esb_id from nfl_data_py)
+# - player_connections table (~250,000 records)
+# - Indexes for fast pathfinding queries
