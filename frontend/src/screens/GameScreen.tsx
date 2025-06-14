@@ -9,7 +9,9 @@ const GameScreen: React.FC<GameScreenProps> = ({ onGameEnd }) => {
   return (
     <Box
       sx={{
-        minHeight: "100vh",
+        flexGrow: 1,
+        width: "100%",
+        position: "relative",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",

@@ -9,7 +9,8 @@ const HowToPlayScreen: React.FC<HowToPlayScreenProps> = ({ onBack }) => {
   return (
     <Box
       sx={{
-        minHeight: "100vh",
+        flexGrow: 1,
+        width: "100%",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
