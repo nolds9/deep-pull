@@ -263,6 +263,14 @@ class MVPETLPipeline:
         """Build connection graph for racing game"""
         logger.info("Building player connections...")
         
+        # To avoid connection explosion from large 90-man offseason rosters,
+        # let's filter down to just regular season data for building connections.
+        if 'game_type' in rosters_df.columns:
+            logger.info("Filtering rosters for REG (regular season) games only...")
+            original_size = len(rosters_df)
+            rosters_df = rosters_df[rosters_df['game_type'] == 'REG'].copy()
+            logger.info(f"  → Roster size reduced from {original_size} to {len(rosters_df)}")
+
         all_connections = []
         
         # 1. Teammate connections (most important for racing)
@@ -296,7 +304,7 @@ class MVPETLPipeline:
         
         # Group by team and season
         for (team, season), group in rosters_df.groupby(['team', 'season']):
-            players = group['player_id'].tolist()
+            players = group['player_id'].unique().tolist()
             
             # Create connections between all teammates
             for i, player1 in enumerate(players):
@@ -324,6 +332,10 @@ class MVPETLPipeline:
         # Group by college
         for college, group in players_with_college.groupby('college'):
             players = group['player_id'].tolist()
+            
+            # Limit connections to avoid explosion (max 50 players per college)
+            if len(players) > 50:
+                players = players[:50]
             
             # Only create connections if 2+ players from same college
             if len(players) >= 2:
