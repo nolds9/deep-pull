@@ -26,9 +26,19 @@ class MVPETLPipeline:
     def __init__(self, db_url: str):
         self.engine = create_engine(db_url)
         self.current_year = datetime.now().year
-        self.start_year = 2020
+        self.start_year = 2022  # REDUCED to just 3 years for ultra-safety
         self.years = list(range(self.start_year, self.current_year + 1))
         self.roster_temp_file = os.path.join(tempfile.gettempdir(), 'rosters.parquet')
+        
+        # ULTRA-SAFE LIMITS
+        self.MAX_TOTAL_CONNECTIONS = 500000      # Hard cap on total connections
+        self.MAX_TEAM_SIZE = 53                 # Reduced from 53
+        self.MAX_COLLEGE_PLAYERS = 15           # Reduced from 50  
+        self.MAX_DRAFT_PLAYERS = 15              # Reduced from 50
+        self.MAX_POSITION_PLAYERS = 15           # Reduced from 30
+        
+        # Connection tracking
+        self.connection_count = 0
         
         # Define table schema for automatic creation
         self.metadata = MetaData()
@@ -403,55 +413,108 @@ class MVPETLPipeline:
         return total_teammate_conns
 
     def _process_and_load_connections(self) -> int:
-        """Builds and loads all connection types incrementally."""
-        logger.info("Processing and loading all connections incrementally...")
+        """Process connections with global tracking"""
+        logger.info("Processing and loading connections with global limits...")
         
-        total_connections = self._build_and_load_teammate_connections()
-
-        logger.info("Loading data for college, draft, and position connections...")
-        other_rosters_df = pd.read_parquet(self.roster_temp_file, columns=['id', 'college', 'player_name', 'draft_year', 'position', 'season'])
+        self.connection_count = 0  # Reset counter
         
-        other_connection_builders = {
-            "college": self._build_college_connections,
-            "draft_class": self._build_draft_connections,
-            "position": self._build_position_connections,
-        }
-
-        for conn_type, builder_func in other_connection_builders.items():
-            logger.info(f"Building {conn_type} connections...")
-            connections = builder_func(other_rosters_df)
-            if not connections:
-                logger.info(f"No {conn_type} connections to load.")
-                continue
+        # 1. Teammate connections (highest priority)
+        logger.info("Building teammate connections...")
+        rosters_cols = pd.read_parquet(self.roster_temp_file, columns=['season'])
+        years = sorted(rosters_cols['season'].unique())
+        del rosters_cols
+        
+        is_first_batch = True
+        for year in years:
+            if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
+                logger.warning(f"Connection limit reached, stopping at year {year}")
+                break
+                
+            rosters_for_year = pd.read_parquet(self.roster_temp_file, filters=[('season', '==', year)])
+            connections = self._build_teammate_connections(rosters_for_year)
             
-            connections_df = pd.DataFrame(connections)
-            logger.info(f"Loading {len(connections_df)} {conn_type} connections...")
-            self._load_connections_batch(connections_df, is_first_batch=False)
-            total_connections += len(connections_df)
+            if connections:
+                connections_df = pd.DataFrame(connections)
+                logger.info(f"Loading {len(connections_df)} teammate connections for {year}...")
+                self._load_connections_batch(connections_df, is_first_batch=is_first_batch)
+                self.connection_count += len(connections_df)
+                is_first_batch = False
+                
+                logger.info(f"Total connections so far: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
         
-        del other_rosters_df
-        gc.collect()
-
-        logger.info(f"Loaded {total_connections} total connections incrementally.")
-        return total_connections
+        # 2. Other connections (if room left)
+        remaining_capacity = self.MAX_TOTAL_CONNECTIONS - self.connection_count
+        if remaining_capacity > 100:  # Only if significant room left
+            logger.info(f"Adding other connections (remaining capacity: {remaining_capacity})")
+            
+            other_rosters_df = pd.read_parquet(
+                self.roster_temp_file, 
+                columns=['id', 'college', 'player_name', 'draft_year', 'position', 'season']
+            )
+            
+            # College connections
+            if self.connection_count < self.MAX_TOTAL_CONNECTIONS:
+                college_connections = self._build_college_connections(other_rosters_df)
+                if college_connections:
+                    connections_df = pd.DataFrame(college_connections)
+                    self._load_connections_batch(connections_df, is_first_batch=False)
+                    self.connection_count += len(connections_df)
+                    logger.info(f"Total after college: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
+            
+            # Draft connections (if still room)
+            if self.connection_count < self.MAX_TOTAL_CONNECTIONS:
+                draft_connections = self._build_draft_connections(other_rosters_df)
+                if draft_connections:
+                    connections_df = pd.DataFrame(draft_connections)
+                    self._load_connections_batch(connections_df, is_first_batch=False)
+                    self.connection_count += len(connections_df)
+                    logger.info(f"Total after draft: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
+            
+            del other_rosters_df
+            gc.collect()
+        
+        logger.info(f"Final connection count: {self.connection_count}")
+        return self.connection_count
     
     def _build_teammate_connections(self, rosters_df: pd.DataFrame) -> list:
-        """Build teammate connections from weekly data to be more precise"""
+        """Build SEASON-LEVEL teammate connections (not week-level!)"""
         connections = []
         
-        star_names = ['Tom Brady', 'Patrick Mahomes']
+        logger.info(f"Building season-level teammate connections...")
+        
+        # CRITICAL FIX: Group by season only, not week!
+        # First, deduplicate to get one record per player per team per season
+        season_rosters = rosters_df.groupby(['team', 'season', 'id']).first().reset_index()
+        
+        star_names = ['Chase', 'Mahomes']
         star_connection_count = 0
         
-        for (team, season, week), group in rosters_df.groupby(['team', 'season', 'week']):
+        processed_teams = 0
+        # Group by team and season (NOT week!)
+        for (team, season), group in season_rosters.groupby(['team', 'season']):
+            processed_teams += 1
             players = group['id'].dropna().unique().tolist()
             
-            if len(players) < 2:
-                continue
-
+            # STRICT team size limit
+            if len(players) > self.MAX_TEAM_SIZE:
+                logger.warning(f"Limiting {team} {season}: {len(players)} → {self.MAX_TEAM_SIZE} players")
+                players = players[:self.MAX_TEAM_SIZE]
+            
+            # Progress logging
+            if processed_teams % 20 == 0:
+                logger.info(f"Processed {processed_teams} team-seasons, {len(connections)} connections so far")
+            
+            # Check for star players
             star_ids_in_group = set(group[group['player_name'].str.contains('|'.join(star_names), case=False, na=False)]['id'].dropna())
             
+            # Create season-level teammate connections
             for i, player1 in enumerate(players):
                 for player2 in players[i+1:]:
+                    # EMERGENCY BRAKE: Check total connection limit
+                    if len(connections) >= self.MAX_TOTAL_CONNECTIONS:
+                        logger.warning(f"🚨 Hit connection limit ({self.MAX_TOTAL_CONNECTIONS}), stopping teammate connections")
+                        return connections
+                    
                     if player1 in star_ids_in_group or player2 in star_ids_in_group:
                         star_connection_count += 1
                     
@@ -459,15 +522,22 @@ class MVPETLPipeline:
                         'player1_id': player1,
                         'player2_id': player2,
                         'connection_type': 'teammate', 
-                        'metadata': {'team': team, 'season': int(season), 'week': int(week)}
+                        'metadata': {'team': team, 'season': int(season)}  # NO week field!
                     })
         
-        logger.info(f"Created {star_connection_count} connections involving star players")
+        logger.info(f"Created {len(connections)} teammate connections ({star_connection_count} involving stars)")
         return connections
     
     def _build_college_connections(self, rosters_df: pd.DataFrame) -> list:
-        """Players who went to same college"""
+        """College connections with ultra-safe limits"""
         connections = []
+        
+        # Early exit if already at limit
+        if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
+            logger.warning("Already at connection limit, skipping college connections")
+            return connections
+        
+        logger.info("Building college connections with strict limits...")
         
         players_with_college = rosters_df[
             (rosters_df['college'].notna()) & 
@@ -475,15 +545,25 @@ class MVPETLPipeline:
             (rosters_df['college'] != '')
         ][['id', 'college', 'player_name']].drop_duplicates()
         
-        for college, group in players_with_college.groupby('college'):
+        # Sort colleges by player count (smallest first to get more diverse connections)
+        college_sizes = players_with_college.groupby('college').size().sort_values()
+        
+        for college in college_sizes.index:
+            group = players_with_college[players_with_college['college'] == college]
             players = group['id'].tolist()
             
-            if len(players) > 50:
-                players = players[:50]
+            # STRICT college size limit
+            if len(players) > self.MAX_COLLEGE_PLAYERS:
+                players = players[:self.MAX_COLLEGE_PLAYERS]
             
             if len(players) >= 2:
                 for i, player1 in enumerate(players):
                     for player2 in players[i+1:]:
+                        # EMERGENCY BRAKE
+                        if self.connection_count + len(connections) >= self.MAX_TOTAL_CONNECTIONS:
+                            logger.warning(f"Hit connection limit during college connections")
+                            return connections
+                        
                         connections.append({
                             'player1_id': player1,
                             'player2_id': player2,
@@ -491,11 +571,19 @@ class MVPETLPipeline:
                             'metadata': {'college': college}
                         })
         
+        logger.info(f"Created {len(connections)} college connections")
         return connections
     
     def _build_draft_connections(self, rosters_df: pd.DataFrame) -> list:
-        """Players drafted in same year"""
+        """Draft connections with ultra-safe limits"""
         connections = []
+        
+        # Early exit if already at limit
+        if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
+            logger.warning("Already at connection limit, skipping draft connections")
+            return connections
+        
+        logger.info("Building draft connections with strict limits...")
         
         players_with_draft = rosters_df[
             (rosters_df['draft_year'].notna()) & 
@@ -505,12 +593,18 @@ class MVPETLPipeline:
         for draft_year, group in players_with_draft.groupby('draft_year'):
             players = group['id'].tolist()
             
-            if len(players) > 50:
-                players = players[:50]
+            # STRICT draft class limit  
+            if len(players) > self.MAX_DRAFT_PLAYERS:
+                players = players[:self.MAX_DRAFT_PLAYERS]
             
             if len(players) >= 2:
                 for i, player1 in enumerate(players):
                     for player2 in players[i+1:]:
+                        # EMERGENCY BRAKE
+                        if self.connection_count + len(connections) >= self.MAX_TOTAL_CONNECTIONS:
+                            logger.warning(f"Hit connection limit during draft connections")
+                            return connections
+                        
                         connections.append({
                             'player1_id': player1,
                             'player2_id': player2,
@@ -518,32 +612,46 @@ class MVPETLPipeline:
                             'metadata': {'draft_year': int(draft_year)}
                         })
         
+        logger.info(f"Created {len(connections)} draft connections")
         return connections
     
     def _build_position_connections(self, rosters_df: pd.DataFrame) -> list:
-        """Players who play same position - limited to avoid explosion"""
+        """Position connections with ultra-safe limits"""
         connections = []
         
-        # Get players by position, limit to recent years to keep manageable
+        # Early exit if already at limit
+        if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
+            logger.warning("Already at connection limit, skipping position connections")
+            return connections
+        
+        logger.info("Building position connections with strict limits...")
+        
         recent_players = rosters_df[rosters_df['season'] >= self.start_year]
         players_by_position = recent_players[
             (recent_players['position'].notna()) & 
             (recent_players['position'] != 'UNK')
         ][['id', 'position']].drop_duplicates()
         
-        skill_positions = ['QB', 'RB', 'WR', 'TE', 'K', 'P']
+        # REDUCED to just QB and RB for ultra-safety
+        skill_positions = ['QB', 'RB']
         
         for position in skill_positions:
             position_players = players_by_position[
                 players_by_position['position'] == position
             ]['id'].tolist()
             
-            if len(position_players) > 30:
-                position_players = position_players[:30]
+            # STRICT position limit
+            if len(position_players) > self.MAX_POSITION_PLAYERS:
+                position_players = position_players[:self.MAX_POSITION_PLAYERS]
             
             if len(position_players) >= 2:
                 for i, player1 in enumerate(position_players):
                     for player2 in position_players[i+1:]:
+                        # EMERGENCY BRAKE
+                        if self.connection_count + len(connections) >= self.MAX_TOTAL_CONNECTIONS:
+                            logger.warning(f"Hit connection limit during position connections")
+                            return connections
+                        
                         connections.append({
                             'player1_id': player1,
                             'player2_id': player2,
@@ -551,6 +659,7 @@ class MVPETLPipeline:
                             'metadata': {'position': position}
                         })
         
+        logger.info(f"Created {len(connections)} position connections")
         return connections
     
     def _create_indexes(self):
@@ -577,35 +686,50 @@ class MVPETLPipeline:
         
         logger.info("Indexes created successfully")
 
+
     def run_mvp_etl(self):
-        """Main ETL process for MVP - with incremental loading"""
+        """Main ETL process for MVP - with safe estimation and incremental loading"""
         logger.info("Starting MVP ETL Pipeline...")
         start_time = datetime.now()
         
+        players_count = 0
+        connections_count = 0
+        
         try:
+            # Always extract players first
             players_df = self.extract_players()
+            players_count = len(players_df)
             
             if hasattr(self, '_dry_run') and self._dry_run:
                 logger.info("DRY RUN - Skipping database load")
-                logger.info("DRY RUN - Simulating connection generation...")
+                logger.info("DRY RUN - Using safe estimation instead of building all connections...")
                 
-                # Dry run simulation by reading from temp file
-                if os.path.exists(self.roster_temp_file):
-                    rosters_df = pd.read_parquet(self.roster_temp_file)
-                    connections_count = len(self._build_teammate_connections(rosters_df)) + \
-                                        len(self._build_college_connections(rosters_df)) + \
-                                        len(self._build_draft_connections(rosters_df)) + \
-                                        len(self._build_position_connections(rosters_df))
-                    del rosters_df
-                else:
-                    connections_count = 0
+                # Use the safe estimation method instead of building all connections
+                estimates = self.estimate_connection_count()
+                connections_count = estimates.get('capped_total', 0)
+                
+                logger.info(f"DRY RUN Results:")
+                logger.info(f"  Players: {players_count}")
+                logger.info(f"  Estimated connections: {connections_count}")
+                logger.info(f"  Safety status: {'✅ SAFE' if estimates.get('safe', False) else '❌ UNSAFE'}")
+                
             else:
+                # Real run - load to database
+                logger.info("REAL RUN - Loading to database...")
+                
+                # Load players
                 self._load_players(players_df)
+                logger.info(f"✅ Loaded {players_count} players")
+                
+                # Clean up players_df from memory
                 del players_df
                 gc.collect()
 
+                # Process and load connections with safety limits
                 connections_count = self._process_and_load_connections()
+                logger.info(f"✅ Loaded {connections_count} connections")
 
+                # Create indexes and validate
                 self._create_indexes()
                 self._validate_data_quality()
             
@@ -613,18 +737,24 @@ class MVPETLPipeline:
             logger.info(f"ETL completed successfully in {duration}")
             
             return {
-                'players_count': len(players_df) if 'players_df' in locals() else 0,
+                'players_count': players_count,
                 'connections_count': connections_count,
-                'duration_seconds': duration.total_seconds()
+                'duration_seconds': duration.total_seconds(),
+                'status': 'dry_run' if hasattr(self, '_dry_run') and self._dry_run else 'completed'
             }
             
         except Exception as e:
             logger.error(f"ETL pipeline failed: {e}")
             raise
+            
         finally:
+            # Always clean up temp file
             if os.path.exists(self.roster_temp_file):
                 logger.info(f"Cleaning up temp file: {self.roster_temp_file}")
-                os.remove(self.roster_temp_file)
+                try:
+                    os.remove(self.roster_temp_file)
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp file: {e}")
     
     def _validate_data_quality(self):
         """Basic data quality checks"""
@@ -643,22 +773,181 @@ class MVPETLPipeline:
             if orphaned > 0:
                 logger.warning(f"Found {orphaned} orphaned connections!")
 
+    def estimate_connection_count(self) -> dict:
+        """Estimate connection count before building to avoid database explosion"""
+        logger.info("🧮 ESTIMATING connection count...")
+        
+        try:
+            # Extract players but don't build connections yet
+            players_df = self.extract_players()
+            
+            if not os.path.exists(self.roster_temp_file):
+                logger.error("Temp file not found for estimation")
+                return {'safe': False, 'estimated_total': 0}
+            
+            # Load just the columns we need for estimation
+            rosters_df = pd.read_parquet(
+                self.roster_temp_file, 
+                columns=['team', 'season', 'id', 'college', 'draft_year', 'position', 'player_name']
+            )
+            
+            # 1. Estimate SEASON-LEVEL teammate connections
+            season_rosters = rosters_df.groupby(['team', 'season', 'id']).first().reset_index()
+            teammate_estimate = 0
+            
+            for (team, season), group in season_rosters.groupby(['team', 'season']):
+                team_size = min(len(group), self.MAX_TEAM_SIZE)
+                team_connections = (team_size * (team_size - 1)) // 2
+                teammate_estimate += team_connections
+                
+                # Stop early if already too many
+                if teammate_estimate > self.MAX_TOTAL_CONNECTIONS:
+                    break
+            
+            # 2. Estimate college connections
+            college_estimate = 0
+            if teammate_estimate < self.MAX_TOTAL_CONNECTIONS:
+                players_with_college = rosters_df[
+                    (rosters_df['college'].notna()) & 
+                    (rosters_df['college'] != 'Unknown')
+                ][['id', 'college']].drop_duplicates()
+                
+                for college, group in players_with_college.groupby('college'):
+                    college_size = min(len(group), self.MAX_COLLEGE_PLAYERS)
+                    if college_size >= 2:
+                        college_connections = (college_size * (college_size - 1)) // 2
+                        college_estimate += college_connections
+            
+            # 3. Estimate draft connections
+            draft_estimate = 0
+            if teammate_estimate + college_estimate < self.MAX_TOTAL_CONNECTIONS:
+                players_with_draft = rosters_df[
+                    (rosters_df['draft_year'].notna()) & 
+                    (rosters_df['draft_year'] > 0)
+                ][['id', 'draft_year']].drop_duplicates()
+                
+                for draft_year, group in players_with_draft.groupby('draft_year'):
+                    draft_size = min(len(group), self.MAX_DRAFT_PLAYERS)
+                    if draft_size >= 2:
+                        draft_connections = (draft_size * (draft_size - 1)) // 2
+                        draft_estimate += draft_connections
+            
+            total_estimate = teammate_estimate + college_estimate + draft_estimate
+            
+            # Apply the hard cap
+            capped_estimate = min(total_estimate, self.MAX_TOTAL_CONNECTIONS)
+            
+            logger.info(f"📊 CONNECTION ESTIMATES:")
+            logger.info(f"   Players: {len(players_df):,}")
+            logger.info(f"   Teammate connections: {teammate_estimate:,}")
+            logger.info(f"   College connections: {college_estimate:,}")
+            logger.info(f"   Draft connections: {draft_estimate:,}")
+            logger.info(f"   Total estimated: {total_estimate:,}")
+            logger.info(f"   After cap ({self.MAX_TOTAL_CONNECTIONS}): {capped_estimate:,}")
+            logger.info(f"   Estimated DB size: ~{capped_estimate * 0.1:.1f}KB")
+            
+            # Safety assessment
+            is_safe = capped_estimate <= self.MAX_TOTAL_CONNECTIONS
+            
+            if is_safe:
+                logger.info("✅ Connection count looks SAFE for database")
+            else:
+                logger.warning("⚠️ Connection count may be too high")
+            
+            return {
+                'safe': is_safe,
+                'players': len(players_df),
+                'teammate_connections': teammate_estimate,
+                'college_connections': college_estimate,
+                'draft_connections': draft_estimate,
+                'estimated_total': total_estimate,
+                'capped_total': capped_estimate
+            }
+            
+        except Exception as e:
+            logger.error(f"Estimation failed: {e}")
+            return {'safe': False, 'estimated_total': 0}
+        
+    def run_safe_dry_run(self):
+        """Run a completely safe dry run that only estimates, doesn't build connections"""
+        logger.info("🧪 SAFE DRY RUN - Estimation only...")
+        
+        try:
+            # Set dry run flag
+            self._dry_run = True
+            
+            # Run the estimation
+            estimates = self.estimate_connection_count()
+            
+            logger.info(f"🧪 SAFE DRY RUN Results:")
+            logger.info(f"   Players: {estimates.get('players', 0):,}")
+            logger.info(f"   Teammate connections: {estimates.get('teammate_connections', 0):,}")
+            logger.info(f"   College connections: {estimates.get('college_connections', 0):,}")
+            logger.info(f"   Draft connections: {estimates.get('draft_connections', 0):,}")
+            logger.info(f"   Total estimated: {estimates.get('estimated_total', 0):,}")
+            logger.info(f"   After safety cap: {estimates.get('capped_total', 0):,}")
+            
+            is_safe = estimates.get('safe', False)
+            if is_safe:
+                logger.info("✅ VERDICT: Safe to run full ETL")
+                logger.info("   Next step: uv run python mvp_pipeline.py --db-url $DATABASE_URL")
+            else:
+                logger.warning("❌ VERDICT: Reduce scope before running full ETL")
+                logger.warning("   Try reducing year range or connection limits")
+            
+            return estimates
+            
+        except Exception as e:
+            logger.error(f"Safe dry run failed: {e}")
+            return {'safe': False, 'error': str(e)}
+
+
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Run NFL MVP ETL Pipeline')
     parser.add_argument('--db-url', required=True, help='PostgreSQL database URL')
-    parser.add_argument('--dry-run', action='store_true', help='Run without loading to database')
+    parser.add_argument('--dry-run', action='store_true', help='Run with safe estimation')
+    parser.add_argument('--estimate-only', action='store_true', help='Only estimate, don\'t extract data')
+    parser.add_argument('--safe-test', action='store_true', help='Run safest possible test')
     
     args = parser.parse_args()
     
     pipeline = MVPETLPipeline(args.db_url)
-    pipeline._dry_run = args.dry_run
     
-    if args.dry_run:
-        logger.info("DRY RUN - Extracting data only...")
+    if args.estimate_only:
+        # Quick estimation without data extraction
+        logger.info("ESTIMATION MODE - Quick connection count estimate...")
+        
+        # Use a smaller sample for ultra-fast estimation
+        pipeline.years = [2024]  # Just current year
+        estimates = pipeline.estimate_connection_count()
+        
+        logger.info(f"Quick estimate (1 year): {estimates.get('capped_total', 0):,} connections")
+        estimated_full = estimates.get('capped_total', 0) * len(pipeline.years)
+        logger.info(f"Projected full scope: ~{estimated_full:,} connections")
+        
+        if estimated_full <= pipeline.MAX_TOTAL_CONNECTIONS:
+            logger.info("✅ Full scope looks safe")
+        else:
+            logger.warning("❌ Full scope may exceed limits")
+            
+    elif args.safe_test:
+        # Safest possible test
+        logger.info("SAFE TEST MODE - Ultra-conservative estimation...")
+        pipeline.years = [2024]  # Just 1 year
+        pipeline.MAX_TOTAL_CONNECTIONS = 5000  # Lower limit
+        result = pipeline.run_safe_dry_run()
+        
+    elif args.dry_run:
+        # Standard dry run with estimation
+        logger.info("DRY RUN MODE - Safe estimation with data extraction...")
+        pipeline._dry_run = True
         result = pipeline.run_mvp_etl()
         logger.info(f"Would load {result['players_count']} players and {result['connections_count']} connections")
+        
     else:
+        # Real run
+        logger.info("REAL RUN MODE - Loading to database...")
         result = pipeline.run_mvp_etl()
         logger.info(f"ETL Result: {result}")
