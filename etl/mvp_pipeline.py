@@ -31,11 +31,11 @@ class MVPETLPipeline:
         self.roster_temp_file = os.path.join(tempfile.gettempdir(), 'rosters.parquet')
         
         # ULTRA-SAFE LIMITS
-        self.MAX_TOTAL_CONNECTIONS = 500000      # Hard cap on total connections
-        self.MAX_TEAM_SIZE = 53                 # Reduced from 53
-        self.MAX_COLLEGE_PLAYERS = 15           # Reduced from 50  
-        self.MAX_DRAFT_PLAYERS = 15              # Reduced from 50
-        self.MAX_POSITION_PLAYERS = 15           # Reduced from 30
+        self.MAX_TOTAL_CONNECTIONS = 75000      # More generous for richer skill connections
+        self.MAX_TEAM_SIZE = 25                 # ~12-15 skill players per team, buffer for safety
+        self.MAX_COLLEGE_PLAYERS = 20           # Richer skill position alumni networks
+        self.MAX_DRAFT_PLAYERS = 15             # Richer skill position draft classes
+        self.MAX_POSITION_PLAYERS = 15          # More position connections between skills
         
         # Connection tracking
         self.connection_count = 0
@@ -101,6 +101,18 @@ class MVPETLPipeline:
         meaningful_games = ['REG', 'WC', 'DIV', 'CON', 'SB']
         rosters_for_connections = rosters_weekly[rosters_weekly['game_type'].isin(meaningful_games)].copy()
         logger.info(f"After game filter: {len(rosters_for_connections)} records")
+        
+        # Add skill position filtering:
+        logger.info("Filtering to skill positions only...")
+        skill_positions = ['QB', 'RB', 'WR', 'TE']
+        original_size = len(rosters_for_connections)
+        rosters_for_connections = rosters_for_connections[
+            rosters_for_connections['position'].isin(skill_positions)
+        ].copy()
+        logger.info(f"Skill position filter: {original_size:,} → {len(rosters_for_connections):,} records")
+        position_counts = rosters_for_connections['position'].value_counts()
+        logger.info(f"Position breakdown: {position_counts.to_dict()}")
+        self._log_skill_position_stats(rosters_for_connections)
         
         del rosters_weekly
         gc.collect()
@@ -477,101 +489,109 @@ class MVPETLPipeline:
         return self.connection_count
     
     def _build_teammate_connections(self, rosters_df: pd.DataFrame) -> list:
-        """Build SEASON-LEVEL teammate connections (not week-level!)"""
+        """Build skill position teammate connections with rich metadata"""
         connections = []
-        
-        logger.info(f"Building season-level teammate connections...")
-        
-        # CRITICAL FIX: Group by season only, not week!
-        # First, deduplicate to get one record per player per team per season
+        logger.info(f"Building skill position teammate connections...")
         season_rosters = rosters_df.groupby(['team', 'season', 'id']).first().reset_index()
-        
-        star_names = ['Chase', 'Mahomes']
+        star_names = [
+            'Patrick Mahomes', 'Josh Allen', 'Lamar Jackson', 'Aaron Rodgers',
+            'Dak Prescott', 'Russell Wilson', 'Kyler Murray',
+            'Christian McCaffrey', 'Derrick Henry', 'Nick Chubb', 'Austin Ekeler',
+            'Saquon Barkley', 'Dalvin Cook', 'Alvin Kamara',
+            'Justin Jefferson', 'Tyreek Hill', 'Davante Adams', 'Stefon Diggs',
+            'DeAndre Hopkins', 'Mike Evans', 'Keenan Allen', 'DK Metcalf',
+            'Travis Kelce', 'George Kittle', 'Mark Andrews', 'Darren Waller'
+        ]
         star_connection_count = 0
-        
         processed_teams = 0
-        # Group by team and season (NOT week!)
         for (team, season), group in season_rosters.groupby(['team', 'season']):
             processed_teams += 1
             players = group['id'].dropna().unique().tolist()
-            
-            # STRICT team size limit
             if len(players) > self.MAX_TEAM_SIZE:
-                logger.warning(f"Limiting {team} {season}: {len(players)} → {self.MAX_TEAM_SIZE} players")
-                players = players[:self.MAX_TEAM_SIZE]
-            
-            # Progress logging
-            if processed_teams % 20 == 0:
+                logger.warning(f"Large skill position team: {team} {season} has {len(players)} players")
+            if processed_teams % 32 == 0:
                 logger.info(f"Processed {processed_teams} team-seasons, {len(connections)} connections so far")
-            
-            # Check for star players
-            star_ids_in_group = set(group[group['player_name'].str.contains('|'.join(star_names), case=False, na=False)]['id'].dropna())
-            
-            # Create season-level teammate connections
             for i, player1 in enumerate(players):
                 for player2 in players[i+1:]:
-                    # EMERGENCY BRAKE: Check total connection limit
                     if len(connections) >= self.MAX_TOTAL_CONNECTIONS:
-                        logger.warning(f"🚨 Hit connection limit ({self.MAX_TOTAL_CONNECTIONS}), stopping teammate connections")
+                        logger.warning(f"🚨 Hit connection limit ({self.MAX_TOTAL_CONNECTIONS})")
                         return connections
-                    
-                    if player1 in star_ids_in_group or player2 in star_ids_in_group:
+                    p1_data = group[group['id'] == player1].iloc[0]
+                    p2_data = group[group['id'] == player2].iloc[0]
+                    p1_is_star = any(p1_data['player_name'].find(star.split()[-1]) != -1 for star in star_names)
+                    p2_is_star = any(p2_data['player_name'].find(star.split()[-1]) != -1 for star in star_names)
+                    if p1_is_star or p2_is_star:
                         star_connection_count += 1
-                    
+                    metadata = {
+                        'team': team,
+                        'season': int(season),
+                        'position_combo': f"{p1_data['position']}-{p2_data['position']}",
+                        'is_qb_skill': (
+                            (p1_data['position'] == 'QB' and p2_data['position'] in ['WR', 'TE', 'RB']) or
+                            (p2_data['position'] == 'QB' and p1_data['position'] in ['WR', 'TE', 'RB'])
+                        ),
+                        'is_receiving_corps': (
+                            p1_data['position'] in ['WR', 'TE'] and p2_data['position'] in ['WR', 'TE']
+                        ),
+                        'is_backfield': (
+                            p1_data['position'] in ['QB', 'RB'] and p2_data['position'] in ['QB', 'RB']
+                        ),
+                        'involves_star': p1_is_star or p2_is_star
+                    }
                     connections.append({
                         'player1_id': player1,
                         'player2_id': player2,
-                        'connection_type': 'teammate', 
-                        'metadata': {'team': team, 'season': int(season)}  # NO week field!
+                        'connection_type': 'teammate',
+                        'metadata': metadata
                     })
-        
-        logger.info(f"Created {len(connections)} teammate connections ({star_connection_count} involving stars)")
+        logger.info(f"Created {len(connections)} skill position teammate connections")
+        logger.info(f"Star player connections: {star_connection_count}")
         return connections
     
     def _build_college_connections(self, rosters_df: pd.DataFrame) -> list:
-        """College connections with ultra-safe limits"""
+        """Enhanced college connections for skill positions"""
         connections = []
-        
-        # Early exit if already at limit
         if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
-            logger.warning("Already at connection limit, skipping college connections")
             return connections
-        
-        logger.info("Building college connections with strict limits...")
-        
-        players_with_college = rosters_df[
-            (rosters_df['college'].notna()) & 
+        logger.info("Building skill position college connections...")
+        skill_players_with_college = rosters_df[
+            (rosters_df['college'].notna()) &
             (rosters_df['college'] != 'Unknown') &
-            (rosters_df['college'] != '')
-        ][['id', 'college', 'player_name']].drop_duplicates()
-        
-        # Sort colleges by player count (smallest first to get more diverse connections)
-        college_sizes = players_with_college.groupby('college').size().sort_values()
-        
-        for college in college_sizes.index:
-            group = players_with_college[players_with_college['college'] == college]
+            (rosters_df['college'] != '') &
+            (rosters_df['position'].isin(['QB', 'RB', 'WR', 'TE']))
+        ][['id', 'college', 'player_name', 'position']].drop_duplicates()
+        for college, group in skill_players_with_college.groupby('college'):
             players = group['id'].tolist()
-            
-            # STRICT college size limit
             if len(players) > self.MAX_COLLEGE_PLAYERS:
-                players = players[:self.MAX_COLLEGE_PLAYERS]
-            
+                positions = group['position'].unique()
+                balanced_players = []
+                players_per_position = self.MAX_COLLEGE_PLAYERS // len(positions)
+                for pos in positions:
+                    pos_players = group[group['position'] == pos]['id'].tolist()
+                    balanced_players.extend(pos_players[:players_per_position])
+                remaining_slots = self.MAX_COLLEGE_PLAYERS - len(balanced_players)
+                other_players = [p for p in players if p not in balanced_players]
+                balanced_players.extend(other_players[:remaining_slots])
+                players = balanced_players
+                logger.info(f"Balanced college network for {college}: {len(players)} skill position players")
             if len(players) >= 2:
                 for i, player1 in enumerate(players):
                     for player2 in players[i+1:]:
-                        # EMERGENCY BRAKE
                         if self.connection_count + len(connections) >= self.MAX_TOTAL_CONNECTIONS:
-                            logger.warning(f"Hit connection limit during college connections")
                             return connections
-                        
+                        p1_pos = group[group['id'] == player1]['position'].iloc[0]
+                        p2_pos = group[group['id'] == player2]['position'].iloc[0]
                         connections.append({
                             'player1_id': player1,
                             'player2_id': player2,
                             'connection_type': 'college',
-                            'metadata': {'college': college}
+                            'metadata': {
+                                'college': college,
+                                'position_combo': f"{p1_pos}-{p2_pos}",
+                                'same_position': p1_pos == p2_pos
+                            }
                         })
-        
-        logger.info(f"Created {len(connections)} college connections")
+        logger.info(f"Created {len(connections)} skill position college connections")
         return connections
     
     def _build_draft_connections(self, rosters_df: pd.DataFrame) -> list:
@@ -616,50 +636,38 @@ class MVPETLPipeline:
         return connections
     
     def _build_position_connections(self, rosters_df: pd.DataFrame) -> list:
-        """Position connections with ultra-safe limits"""
+        """Enhanced position connections for skill positions"""
         connections = []
-        
-        # Early exit if already at limit
         if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
-            logger.warning("Already at connection limit, skipping position connections")
             return connections
-        
-        logger.info("Building position connections with strict limits...")
-        
-        recent_players = rosters_df[rosters_df['season'] >= self.start_year]
+        logger.info("Building enhanced skill position connections...")
+        recent_players = rosters_df[rosters_df['season'] >= 2022]
         players_by_position = recent_players[
-            (recent_players['position'].notna()) & 
-            (recent_players['position'] != 'UNK')
-        ][['id', 'position']].drop_duplicates()
-        
-        # REDUCED to just QB and RB for ultra-safety
-        skill_positions = ['QB', 'RB']
-        
-        for position in skill_positions:
+            recent_players['position'].isin(['QB', 'RB', 'WR', 'TE'])
+        ][['id', 'position', 'player_name']].drop_duplicates()
+        for position in ['QB', 'RB', 'WR', 'TE']:
             position_players = players_by_position[
                 players_by_position['position'] == position
-            ]['id'].tolist()
-            
-            # STRICT position limit
-            if len(position_players) > self.MAX_POSITION_PLAYERS:
-                position_players = position_players[:self.MAX_POSITION_PLAYERS]
-            
-            if len(position_players) >= 2:
-                for i, player1 in enumerate(position_players):
-                    for player2 in position_players[i+1:]:
-                        # EMERGENCY BRAKE
+            ]
+            players = position_players['id'].tolist()
+            if len(players) > self.MAX_POSITION_PLAYERS:
+                players = players[:self.MAX_POSITION_PLAYERS]
+            if len(players) >= 2:
+                logger.info(f"Connecting {len(players)} {position} players")
+                for i, player1 in enumerate(players):
+                    for player2 in players[i+1:]:
                         if self.connection_count + len(connections) >= self.MAX_TOTAL_CONNECTIONS:
-                            logger.warning(f"Hit connection limit during position connections")
                             return connections
-                        
                         connections.append({
                             'player1_id': player1,
                             'player2_id': player2,
                             'connection_type': 'position',
-                            'metadata': {'position': position}
+                            'metadata': {
+                                'position': position,
+                                'skill_position_network': True
+                            }
                         })
-        
-        logger.info(f"Created {len(connections)} position connections")
+        logger.info(f"Created {len(connections)} skill position connections")
         return connections
     
     def _create_indexes(self):
@@ -686,67 +694,85 @@ class MVPETLPipeline:
         
         logger.info("Indexes created successfully")
 
+    def _log_skill_position_stats(self, rosters_df: pd.DataFrame):
+        """Comprehensive skill position analysis"""
+        total_players = rosters_df['player_name'].nunique()
+        logger.info(f"📊 SKILL POSITION ANALYSIS:")
+        logger.info(f"   Total skill position players: {total_players:,}")
+        position_stats = rosters_df.groupby('position')['player_name'].nunique().sort_values(ascending=False)
+        for pos, count in position_stats.items():
+            logger.info(f"   {pos}: {count:,} unique players")
+        team_season_stats = rosters_df.groupby(['team', 'season']).size()
+        logger.info(f"   Avg skill players per team-season: {team_season_stats.mean():.1f}")
+        logger.info(f"   Max skill players per team-season: {team_season_stats.max()}")
+        logger.info(f"   Min skill players per team-season: {team_season_stats.min()}")
+        star_names = ['Jefferson', 'Mahomes', 'McCaffrey', 'Kelce', 'Allen', 'Henry']
+        logger.info("   Star player verification:")
+        for star in star_names:
+            star_records = rosters_df[rosters_df['player_name'].str.contains(star, case=False, na=False)]
+            if len(star_records) > 0:
+                teams = star_records[['team', 'season']].drop_duplicates()
+                logger.info(f"     {star}: {len(star_records)} records across {len(teams)} team-seasons")
+            else:
+                logger.warning(f"     {star}: NOT FOUND")
+        position_combos = rosters_df.groupby(['team', 'season'])['position'].apply(
+            lambda x: '-'.join(sorted(x.unique()))
+        ).value_counts().head(10)
+        logger.info("   Most common position combinations per team:")
+        for combo, count in position_combos.items():
+            logger.info(f"     {combo}: {count} team-seasons")
 
     def run_mvp_etl(self):
         """Main ETL process for MVP - with safe estimation and incremental loading"""
         logger.info("Starting MVP ETL Pipeline...")
         start_time = datetime.now()
-        
         players_count = 0
         connections_count = 0
-        
         try:
             # Always extract players first
             players_df = self.extract_players()
             players_count = len(players_df)
-            
             if hasattr(self, '_dry_run') and self._dry_run:
                 logger.info("DRY RUN - Skipping database load")
                 logger.info("DRY RUN - Using safe estimation instead of building all connections...")
-                
-                # Use the safe estimation method instead of building all connections
                 estimates = self.estimate_connection_count()
                 connections_count = estimates.get('capped_total', 0)
-                
                 logger.info(f"DRY RUN Results:")
                 logger.info(f"  Players: {players_count}")
                 logger.info(f"  Estimated connections: {connections_count}")
                 logger.info(f"  Safety status: {'✅ SAFE' if estimates.get('safe', False) else '❌ UNSAFE'}")
-                
             else:
                 # Real run - load to database
                 logger.info("REAL RUN - Loading to database...")
-                
-                # Load players
                 self._load_players(players_df)
                 logger.info(f"✅ Loaded {players_count} players")
-                
-                # Clean up players_df from memory
                 del players_df
                 gc.collect()
-
-                # Process and load connections with safety limits
                 connections_count = self._process_and_load_connections()
                 logger.info(f"✅ Loaded {connections_count} connections")
-
-                # Create indexes and validate
                 self._create_indexes()
+                # SAFEGUARD: Remove orphaned connections
+                with self.engine.connect() as conn:
+                    result = conn.execute(text("""
+                        DELETE FROM player_connections
+                        WHERE player1_id NOT IN (SELECT id FROM players)
+                           OR player2_id NOT IN (SELECT id FROM players)
+                        RETURNING id
+                    """))
+                    orphaned_deleted = result.rowcount if hasattr(result, 'rowcount') else 0
+                    logger.info(f"🧹 Deleted {orphaned_deleted} orphaned connections after load.")
                 self._validate_data_quality()
-            
             duration = datetime.now() - start_time
             logger.info(f"ETL completed successfully in {duration}")
-            
             return {
                 'players_count': players_count,
                 'connections_count': connections_count,
                 'duration_seconds': duration.total_seconds(),
                 'status': 'dry_run' if hasattr(self, '_dry_run') and self._dry_run else 'completed'
             }
-            
         except Exception as e:
             logger.error(f"ETL pipeline failed: {e}")
             raise
-            
         finally:
             # Always clean up temp file
             if os.path.exists(self.roster_temp_file):
