@@ -1,35 +1,63 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import React from "react";
+import { ThemeProvider, CssBaseline, createTheme } from "@mui/material";
+// Placeholder imports for screens (to be implemented)
+import HomeScreen from "./screens/HomeScreen.js";
+import QueueScreen from "./screens/QueueScreen.js";
+import GameScreen from "./screens/GameScreen.js";
+import EndGameScreen from "./screens/EndGameScreen.js";
+import HowToPlayScreen from "./screens/HowToPlayScreen.js";
 
-function App() {
-  const [count, setCount] = useState(0)
+const theme = createTheme();
+
+// For now, use React state for screen switching; will migrate to XState
+export default function App() {
+  const [screen, setScreen] = React.useState<
+    "home" | "queue" | "countdown" | "game" | "end" | "howto"
+  >("home");
+
+  let content = null;
+  switch (screen) {
+    case "home":
+      content = (
+        <HomeScreen
+          onPlay={() => setScreen("queue")}
+          onHowToPlay={() => setScreen("howto")}
+        />
+      );
+      break;
+    case "queue":
+      content = (
+        <QueueScreen
+          onMatched={() => setScreen("countdown")}
+          onBack={() => setScreen("home")}
+        />
+      );
+      break;
+    case "countdown":
+      content = <div>Countdown... (to be implemented)</div>;
+      break;
+    case "game":
+      content = <GameScreen onGameEnd={() => setScreen("end")} />;
+      break;
+    case "end":
+      content = (
+        <EndGameScreen
+          onPlayAgain={() => setScreen("queue")}
+          onHome={() => setScreen("home")}
+        />
+      );
+      break;
+    case "howto":
+      content = <HowToPlayScreen onBack={() => setScreen("home")} />;
+      break;
+    default:
+      content = <div>Unknown screen</div>;
+  }
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      {content}
+    </ThemeProvider>
+  );
 }
-
-export default App
