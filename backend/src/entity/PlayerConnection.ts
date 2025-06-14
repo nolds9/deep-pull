@@ -1,17 +1,14 @@
-import { Entity, PrimaryGeneratedColumn, Column } from "typeorm";
+import { Entity, PrimaryColumn, Column } from "typeorm";
 
 @Entity({ name: "player_connections" })
 export class PlayerConnection {
-  @PrimaryGeneratedColumn()
-  id!: number;
-
-  @Column()
+  @PrimaryColumn()
   player1_id!: string;
 
-  @Column()
+  @PrimaryColumn()
   player2_id!: string;
 
-  @Column()
+  @PrimaryColumn()
   connection_type!: string;
 
   @Column({ type: "jsonb", nullable: true })
