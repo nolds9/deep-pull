@@ -1,0 +1,27 @@
+{
+    "name": "nfl-gaming-backend",
+    "version": "0.1.0",
+    "description": "Backend server for NFL Player Connection Game (MVP)",
+    "main": "dist/app.js",
+    "scripts": {
+        "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
+        "build": "tsc",
+        "start": "node dist/app.js"
+    },
+    "dependencies": {
+        "express": "^5.1.0",
+        "socket.io": "^4.8.1",
+        "typeorm": "^0.3.24",
+        "pg": "^8.16.0",
+        "reflect-metadata": "^0.2.2",
+        "dotenv": "^16.5.0"
+    },
+    "devDependencies": {
+        "typescript": "^5.8.3",
+        "ts-node": "^10.9.2",
+        "ts-node-dev": "^2.0.0",
+        "@types/express": "^5.0.3",
+        "@types/node": "^24.0.1",
+        "@types/socket.io": "^3.0.2"
+    }
+}
