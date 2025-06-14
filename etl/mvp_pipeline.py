@@ -1,8 +1,8 @@
-# mvp_pipeline.py
 import nfl_data_py as nfl
 import pandas as pd
 import psycopg2
 from sqlalchemy import create_engine, text
+from sqlalchemy.types import JSON
 import os
 from datetime import datetime
 import logging
@@ -171,6 +171,15 @@ class MVPETLPipeline:
         # Fill missing draft years with 0
         merged['draft_year'] = merged['draft_year'].fillna(0).astype(int)
         
+        # Create a canonical player ID to use as the primary key.
+        # The 'player_id' from seasonal rosters is not always unique to a player.
+        merged['id'] = merged['esb_id'].fillna(merged['gsis_id'])
+        missing_id_count = merged['id'].isna().sum()
+        if missing_id_count > 0:
+            # As a last resort, use the original player_id.
+            logger.warning(f"{missing_id_count} records have no esb_id or gsis_id. Using original player_id as fallback.")
+            merged['id'].fillna(merged['player_id'], inplace=True)
+            
         return merged
         
     def _clean_player_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -178,17 +187,12 @@ class MVPETLPipeline:
         
         logger.info("Cleaning and deduplicating player data...")
         print(f"🔍 Raw merged data shape: {df.shape}")
-        print(f"🔍 Available columns: {df.columns.tolist()}")
         
-        # Check what columns we actually have
-        required_cols = ['player_id', 'player_name', 'position', 'college', 'draft_year', 'team', 'season']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        available_cols = [col for col in required_cols if col in df.columns]
-        
-        if missing_cols:
-            print(f"⚠️ Missing columns: {missing_cols}")
-        print(f"✅ Available columns: {available_cols}")
-        
+        # Check for presence of our new canonical 'id'
+        if 'id' not in df.columns:
+            logger.error("Canonical 'id' column is missing! Aborting clean.")
+            return pd.DataFrame()
+
         # Named aggregation (avoids pandas bug with lambdas & multi-index)
         agg_named: dict[str, tuple[str, Any]] = {}
         if 'player_name' in df.columns:
@@ -212,11 +216,11 @@ class MVPETLPipeline:
             return pd.DataFrame()
 
         try:
+            # Group by the canonical 'id' to ensure one record per player
             player_summary = (
-                df.groupby('player_id')
+                df.groupby('id')
                   .agg(**agg_named)
                   .reset_index()
-                  .rename(columns={'player_id': 'id'})
             )
             print(f"🔍 After groupby shape: {player_summary.shape}")
         except Exception as e:
@@ -304,7 +308,7 @@ class MVPETLPipeline:
         
         # Group by team and season
         for (team, season), group in rosters_df.groupby(['team', 'season']):
-            players = group['player_id'].unique().tolist()
+            players = group['id'].unique().tolist()
             
             # Create connections between all teammates
             for i, player1 in enumerate(players):
@@ -327,11 +331,11 @@ class MVPETLPipeline:
             (rosters_df['college'].notna()) & 
             (rosters_df['college'] != 'Unknown') &
             (rosters_df['college'] != '')
-        ][['player_id', 'college', 'player_name']].drop_duplicates()
+        ][['id', 'college', 'player_name']].drop_duplicates()
         
         # Group by college
         for college, group in players_with_college.groupby('college'):
-            players = group['player_id'].tolist()
+            players = group['id'].tolist()
             
             # Limit connections to avoid explosion (max 50 players per college)
             if len(players) > 50:
@@ -358,11 +362,11 @@ class MVPETLPipeline:
         players_with_draft = rosters_df[
             (rosters_df['draft_year'].notna()) & 
             (rosters_df['draft_year'] > 0)
-        ][['player_id', 'draft_year']].drop_duplicates()
+        ][['id', 'draft_year']].drop_duplicates()
         
         # Group by draft year
         for draft_year, group in players_with_draft.groupby('draft_year'):
-            players = group['player_id'].tolist()
+            players = group['id'].tolist()
             
             # Limit connections to avoid explosion (max 50 players per draft year)
             if len(players) > 50:
@@ -389,7 +393,7 @@ class MVPETLPipeline:
         players_by_position = recent_players[
             (recent_players['position'].notna()) & 
             (recent_players['position'] != 'UNK')
-        ][['player_id', 'position']].drop_duplicates()
+        ][['id', 'position']].drop_duplicates()
         
         # Only connect "skill positions" to keep connections meaningful
         skill_positions = ['QB', 'RB', 'WR', 'TE', 'K', 'P']
@@ -397,7 +401,7 @@ class MVPETLPipeline:
         for position in skill_positions:
             position_players = players_by_position[
                 players_by_position['position'] == position
-            ]['player_id'].tolist()
+            ]['id'].tolist()
             
             # Limit to prevent explosion (max 30 per position)
             if len(position_players) > 30:
@@ -441,7 +445,8 @@ class MVPETLPipeline:
                     self.engine,
                     if_exists='replace' if i == 0 else 'append',
                     index=False,
-                    method='multi'
+                    method='multi',
+                    dtype={'metadata': JSON}  # Explicitly set JSON type for metadata
                 )
                 logger.info(f"Loaded batch {i//batch_size + 1}/{total_batches}")
             
