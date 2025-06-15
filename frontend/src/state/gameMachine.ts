@@ -12,6 +12,7 @@ export interface GameContext {
   opponentId?: string;
   winnerId?: string;
   winningPath?: string[];
+  solutionPaths?: string[][];
 }
 
 export type GameEvent =
@@ -31,28 +32,27 @@ export type GameEvent =
   | { type: "OPPONENT_READY" }
   | { type: "ALL_PLAYERS_READY" }
   | { type: "COUNTDOWN_DONE" }
-  | { type: "GAME_END"; data: { winnerId?: string; winningPath: string[] } }
+  | {
+      type: "GAME_END";
+      data: {
+        winnerId?: string;
+        winningPath: string[];
+        solutionPaths?: string[][];
+      };
+    }
   | { type: "TIMER_TICK" }
-  | { type: "TIMEOUT" }
   | { type: "PLAY_AGAIN" }
   | { type: "HOME" };
 
-const gameTimerActor = fromCallback<GameEvent, { timer: number }>(
-  ({ sendBack, input }) => {
-    const interval = setInterval(() => {
-      sendBack({ type: "TIMER_TICK" });
-    }, 1000);
+const gameTimerActor = fromCallback<GameEvent>(({ sendBack }) => {
+  const interval = setInterval(() => {
+    sendBack({ type: "TIMER_TICK" });
+  }, 1000);
 
-    const timeout = setTimeout(() => {
-      sendBack({ type: "TIMEOUT" });
-    }, input.timer * 1000);
-
-    return () => {
-      clearInterval(interval);
-      clearTimeout(timeout);
-    };
-  }
-);
+  return () => {
+    clearInterval(interval);
+  };
+});
 
 export const gameMachine = createMachine({
   id: "game",
@@ -62,7 +62,7 @@ export const gameMachine = createMachine({
   },
   initial: "home",
   context: {
-    timer: 30,
+    timer: 60,
     draw: false,
     myReady: false,
     opponentReady: false,
@@ -72,6 +72,7 @@ export const gameMachine = createMachine({
     opponentId: undefined,
     winnerId: undefined,
     winningPath: undefined,
+    solutionPaths: undefined,
   },
   states: {
     home: {
@@ -114,11 +115,10 @@ export const gameMachine = createMachine({
       },
     },
     game: {
-      entry: assign({ timer: () => 30, draw: () => false }),
+      entry: assign({ timer: () => 60, draw: () => false }),
       invoke: {
         id: "gameTimer",
         src: gameTimerActor,
-        input: ({ context }) => ({ timer: context.timer }),
       },
       on: {
         GAME_END: {
@@ -126,14 +126,11 @@ export const gameMachine = createMachine({
           actions: assign({
             winnerId: ({ event }) => event.data.winnerId,
             winningPath: ({ event }) => event.data.winningPath,
+            solutionPaths: ({ event }) => event.data.solutionPaths,
           }),
         },
         TIMER_TICK: {
           actions: assign({ timer: ({ context }) => context.timer - 1 }),
-        },
-        TIMEOUT: {
-          target: "end",
-          actions: assign({ draw: () => true }),
         },
       },
     },
@@ -151,6 +148,7 @@ export const gameMachine = createMachine({
             opponentId: undefined,
             winnerId: undefined,
             winningPath: undefined,
+            solutionPaths: undefined,
           }),
         },
         HOME: {
@@ -165,6 +163,7 @@ export const gameMachine = createMachine({
             opponentId: undefined,
             winnerId: undefined,
             winningPath: undefined,
+            solutionPaths: undefined,
           }),
         },
       },

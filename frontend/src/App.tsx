@@ -4,6 +4,7 @@ import { useMachine } from "@xstate/react";
 import { gameMachine } from "./state/gameMachine";
 import { socket } from "./socket";
 import type { Player } from "./types";
+import { AnimatePresence, motion } from "motion/react";
 
 import HomeScreen from "./screens/HomeScreen.js";
 import QueueScreen from "./screens/QueueScreen.js";
@@ -49,8 +50,12 @@ export default function App() {
       send({ type: "ALL_PLAYERS_READY" });
     };
 
-    const onGameEnd = (data: { winnerId?: string; winningPath: string[] }) => {
-      console.log("Game ended:", data);
+    const onGameEnd = (data: {
+      winnerId?: string;
+      winningPath: string[];
+      solutionPaths?: string[][];
+    }) => {
+      console.log("Game ended event received:", data);
       send({ type: "GAME_END", data });
     };
 
@@ -104,11 +109,12 @@ export default function App() {
             <GameScreen
               startPlayer={state.context.startPlayer}
               endPlayer={state.context.endPlayer}
-              onGameEnd={() =>
-                socket.emit("forceEndGame", {
+              onPathSubmit={(path: string[]) => {
+                socket.emit("submitPath", {
                   sessionId: state.context.sessionId,
-                })
-              }
+                  path: path,
+                });
+              }}
             />
             <GameTimer seconds={state.context.timer} />
           </>
@@ -119,7 +125,15 @@ export default function App() {
       content = (
         <EndGameScreen
           isWinner={state.context.winnerId === socket.id}
-          reason={state.context.winningPath?.[0]}
+          reason={
+            state.context.winningPath?.[0] === "opponent_disconnected"
+              ? "opponent_disconnected"
+              : state.context.winningPath?.[0] === "timeout"
+              ? "timeout"
+              : undefined
+          }
+          winningPath={state.context.winningPath}
+          solutionPaths={state.context.solutionPaths}
           onPlayAgain={() => send({ type: "PLAY_AGAIN" })}
           onHome={() => send({ type: "HOME" })}
         />
@@ -141,9 +155,25 @@ export default function App() {
           flexDirection: "column",
           minHeight: "100vh",
           width: "100vw",
+          overflow: "hidden",
         }}
       >
-        {content}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={String(state.value)}
+            initial={{ opacity: 0, x: -50 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 50 }}
+            transition={{ duration: 0.3 }}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              flexGrow: 1,
+            }}
+          >
+            {content}
+          </motion.div>
+        </AnimatePresence>
       </Box>
     </ThemeProvider>
   );

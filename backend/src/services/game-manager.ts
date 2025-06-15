@@ -16,6 +16,7 @@ interface GameSession {
   winner?: string;
   winningPath?: string[];
   startTime?: Date;
+  timerId?: NodeJS.Timeout;
 }
 
 export class GameManager {
@@ -64,6 +65,7 @@ export class GameManager {
     logger.info(
       `Game session ${sessionId}: startPlayer=${startPlayer.name} (${startPlayer.id}), endPlayer=${endPlayer.name} (${endPlayer.id})`
     );
+
     const session: GameSession = {
       id: sessionId,
       players: [player1, player2],
@@ -106,8 +108,11 @@ export class GameManager {
       );
       return;
     }
+
+    const opponentId = session.players.find((p) => p !== socketId);
+
     try {
-      const isValid = await this.validatePath(
+      const isValid = await this.pathfinding.validatePath(
         path,
         session.startPlayer.id,
         session.endPlayer.id
@@ -119,52 +124,61 @@ export class GameManager {
         session.winner = socketId;
         session.winningPath = path;
         session.status = "finished";
-        // Notify both players
-        this.io.to(session.players[0]).emit("gameEnd", {
+
+        if (opponentId) {
+          this.io.to(opponentId).emit("opponentAttemptedPath", {
+            success: true,
+            pathLength: path.length,
+          });
+        }
+
+        const winningPathWithNames = (
+          await this.pathfinding.convertIdsToNames([path])
+        )[0];
+
+        // The winner sees their own path.
+        this.io.to(socketId).emit("gameEnd", {
           winnerId: socketId,
-          winningPath: path,
+          winningPath: winningPathWithNames,
         });
-        this.io.to(session.players[1]).emit("gameEnd", {
-          winnerId: socketId,
-          winningPath: path,
-        });
+
+        // The loser sees the winning path and up to 3 solution paths.
+        if (opponentId) {
+          const solutionPaths = await this.pathfinding.findShortestPaths(
+            session.startPlayer.id,
+            session.endPlayer.id,
+            3
+          );
+          const solutionPathsWithNames =
+            await this.pathfinding.convertIdsToNames(solutionPaths);
+          this.io.to(opponentId).emit("gameEnd", {
+            winnerId: socketId,
+            winningPath: winningPathWithNames,
+            solutionPaths: solutionPathsWithNames,
+          });
+        }
+
+        if (session.timerId) clearTimeout(session.timerId);
         this.activeSessions.delete(sessionId);
         logger.info(`Game session ${sessionId} finished. Winner: ${socketId}`);
+      } else {
+        // The path is not valid, notify the player.
+        this.io.to(socketId).emit("invalidPath", { pathLength: path.length });
+        if (opponentId) {
+          this.io.to(opponentId).emit("opponentAttemptedPath", {
+            success: false,
+            pathLength: path.length,
+          });
+        }
+        logger.info(
+          `Invalid path submitted by ${socketId} for session ${sessionId}`
+        );
       }
     } catch (err) {
       logger.error(
         `Error during path submission for session ${sessionId}: ${err}`
       );
     }
-  }
-
-  private async validatePath(
-    path: string[],
-    startId: string,
-    endId: string
-  ): Promise<boolean> {
-    logger.info(
-      `Validating path: ${JSON.stringify(
-        path
-      )} (start: ${startId}, end: ${endId})`
-    );
-    if (path.length < 2) return false;
-    if (path[0] !== startId || path[path.length - 1] !== endId) return false;
-    // Verify each step is connected
-    const connectionRepo = AppDataSource.getRepository(PlayerConnection);
-    for (let i = 0; i < path.length - 1; i++) {
-      const connection = await connectionRepo.findOne({
-        where: [
-          { player1_id: path[i], player2_id: path[i + 1] },
-          { player1_id: path[i + 1], player2_id: path[i] },
-        ],
-      });
-      if (!connection) {
-        logger.warn(`Invalid connection between ${path[i]} and ${path[i + 1]}`);
-        return false;
-      }
-    }
-    return true;
   }
 
   playerReady(socketId: string, sessionId: string) {
@@ -195,6 +209,12 @@ export class GameManager {
         `All players ready in session ${sessionId}. Starting countdown.`
       );
       session.status = "active"; // Game is now active
+
+      // Start a server-side timer
+      session.timerId = setTimeout(() => {
+        this.handleTimeout(sessionId);
+      }, (60 + 3) * 1000); // 60s game + 3s countdown
+
       this.io.to(session.players[0]).emit("allPlayersReady");
       this.io.to(session.players[1]).emit("allPlayersReady");
     }
@@ -231,6 +251,8 @@ export class GameManager {
       logger.info(
         `Player ${socketId} was in active session ${sessionToCancel.id}. Ending game.`
       );
+      if (sessionToCancel.timerId) clearTimeout(sessionToCancel.timerId);
+
       const winnerId = sessionToCancel.players.find((p) => p !== socketId);
       if (winnerId) {
         // Formally end the game, declaring the remaining player the winner
@@ -268,5 +290,45 @@ export class GameManager {
     logger.info(
       `Game session ${sessionId} force-ended by ${socketId}. Winner: ${winnerId}`
     );
+  }
+
+  async handleTimeout(sessionId: string) {
+    const session = this.activeSessions.get(sessionId);
+    if (!session || session.status !== "active") {
+      logger.warn(
+        `Timeout for an already finished or invalid session: ${sessionId}`
+      );
+      return;
+    }
+
+    logger.info(`Game session ${sessionId} timed out.`);
+    session.status = "finished";
+    let solutionPathsWithNames: string[][] = [];
+
+    try {
+      const solutionPaths = await this.pathfinding.findShortestPaths(
+        session.startPlayer.id,
+        session.endPlayer.id,
+        3
+      );
+      solutionPathsWithNames = await this.pathfinding.convertIdsToNames(
+        solutionPaths
+      );
+    } catch (error) {
+      logger.error(
+        `Error finding solution paths for session ${sessionId}: ${error}`
+      );
+    }
+
+    const gameEndPayload = {
+      winnerId: null, // No winner on timeout
+      winningPath: ["timeout"],
+      solutionPaths: solutionPathsWithNames,
+    };
+
+    this.io.to(session.players[0]).emit("gameEnd", gameEndPayload);
+    this.io.to(session.players[1]).emit("gameEnd", gameEndPayload);
+
+    this.activeSessions.delete(sessionId);
   }
 }

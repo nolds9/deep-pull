@@ -11,5 +11,5 @@ export const AppDataSource = new DataSource({
   url: process.env.DATABASE_URL,
   entities: [Player, PlayerConnection],
   synchronize: false, // Set to false for production, true for dev only if needed
-  logging: false,
+  logging: true,
 });
