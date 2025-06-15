@@ -18,47 +18,33 @@ export class PathfindingService {
     limit: number
   ): Promise<string[][]> {
     const query = `
-      WITH RECURSIVE search_graph(start_node, end_node, path, depth) AS (
-          -- Anchor: direct connections from the start player
-          SELECT
-              player1_id,
-              player2_id,
-              ARRAY[player1_id, player2_id],
-              1
-          FROM player_connections
-          WHERE player1_id = $1
-        UNION
-          SELECT
-              player2_id,
-              player1_id,
-              ARRAY[player2_id, player1_id],
-              1
-          FROM player_connections
-          WHERE player2_id = $1
-
+      WITH RECURSIVE search_graph(end_node, path, depth) AS (
+        -- Anchor: The starting player
+        SELECT
+            $1::varchar as end_node,
+            ARRAY[$1::varchar] as path,
+            0 as depth
+        
         UNION ALL
 
-          -- Recursive step: join with next connections
-          SELECT
-              sg.start_node,
-              c.player2_id,
-              sg.path || c.player2_id,
-              sg.depth + 1
-          FROM search_graph sg
-          JOIN player_connections c ON sg.end_node = c.player1_id
-          WHERE NOT c.player2_id = ANY(sg.path) AND sg.depth < 5 -- Avoid cycles and limit depth
-        UNION ALL
-          SELECT
-              sg.start_node,
-              c.player1_id,
-              sg.path || c.player1_id,
-              sg.depth + 1
-          FROM search_graph sg
-          JOIN player_connections c ON sg.end_node = c.player2_id
-          WHERE NOT c.player1_id = ANY(sg.path) AND sg.depth < 5 -- Avoid cycles and limit depth
+        -- Recursive step: find next connections
+        SELECT
+            CASE
+                WHEN sg.end_node = c.player1_id THEN c.player2_id
+                ELSE c.player1_id
+            END,
+            sg.path || CASE
+                WHEN sg.end_node = c.player1_id THEN c.player2_id
+                ELSE c.player1_id
+            END,
+            sg.depth + 1
+        FROM search_graph sg
+        JOIN player_connections c ON sg.end_node = c.player1_id OR sg.end_node = c.player2_id
+        WHERE NOT (CASE WHEN sg.end_node = c.player1_id THEN c.player2_id ELSE c.player1_id END) = ANY(sg.path) -- Avoid cycles
+          AND sg.depth < 5 -- Limit depth
       )
       SELECT path FROM search_graph
-      WHERE end_node = $2
+      WHERE end_node = $2 AND depth > 0 -- Find paths that reached the end node
       LIMIT $3;
     `;
 
