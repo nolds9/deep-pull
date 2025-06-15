@@ -1,19 +1,30 @@
 import React from "react";
 import { Box, Button, Typography, Stack } from "@mui/material";
+import { socket } from "../socket";
 
 interface QueueScreenProps {
-  onMatched: () => void;
   onBack: () => void;
 }
 
-const QueueScreen: React.FC<QueueScreenProps> = ({ onMatched, onBack }) => {
+const QueueScreen: React.FC<QueueScreenProps> = ({ onBack }) => {
   const [dots, setDots] = React.useState("");
+
   React.useEffect(() => {
+    // When the component mounts, emit an event to join the server queue.
+    socket.emit("joinQueue");
+    console.log("Emitted joinQueue event");
+
     const interval = setInterval(() => {
       setDots((prev) => (prev.length < 3 ? prev + "." : ""));
     }, 500);
-    return () => clearInterval(interval);
+
+    return () => {
+      clearInterval(interval);
+      socket.emit("leaveQueue");
+      console.log("Emitted leaveQueue event");
+    };
   }, []);
+
   return (
     <Box
       sx={{
@@ -30,9 +41,6 @@ const QueueScreen: React.FC<QueueScreenProps> = ({ onMatched, onBack }) => {
         Waiting for opponent{dots}
       </Typography>
       <Stack spacing={2} direction="row">
-        <Button variant="contained" color="primary" onClick={onMatched}>
-          Simulate Match Found
-        </Button>
         <Button variant="outlined" color="secondary" onClick={onBack}>
           Back
         </Button>

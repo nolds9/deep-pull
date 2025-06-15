@@ -1,11 +1,18 @@
 import React from "react";
 import { Box, Button, Typography } from "@mui/material";
+import type { Player } from "../types";
 
 interface GameScreenProps {
+  startPlayer: Player;
+  endPlayer: Player;
   onGameEnd: () => void;
 }
 
-const GameScreen: React.FC<GameScreenProps> = ({ onGameEnd }) => {
+const GameScreen: React.FC<GameScreenProps> = ({
+  startPlayer,
+  endPlayer,
+  onGameEnd,
+}) => {
   return (
     <Box
       sx={{
@@ -20,7 +27,8 @@ const GameScreen: React.FC<GameScreenProps> = ({ onGameEnd }) => {
       }}
     >
       <Typography variant="h4" color="white" gutterBottom>
-        Game in progress (placeholder)
+        Find a path from <strong>{startPlayer.name}</strong> to{" "}
+        <strong>{endPlayer.name}</strong>
       </Typography>
       <Button variant="contained" color="primary" onClick={onGameEnd}>
         Simulate Game End

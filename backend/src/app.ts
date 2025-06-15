@@ -77,13 +77,21 @@ AppDataSource.initialize()
       };
       // Register game events
       socket.on("joinQueue", () => gameManager.joinQueue(socket.id));
+      socket.on("leaveQueue", () => gameManager.leaveQueue(socket.id));
+      socket.on("playerReady", (data) =>
+        gameManager.playerReady(socket.id, data.sessionId)
+      );
       socket.on("submitPath", (data) =>
         gameManager.submitPath(data.sessionId, socket.id, data.path)
       );
+      socket.on("forceEndGame", (data) => {
+        gameManager.forceEndGame(socket.id, data.sessionId);
+      });
       socket.on("disconnect", (reason) => {
         logger.info(
           `[Socket.io] Client disconnected: ${socket.id} reason=${reason}`
         );
+        gameManager.handleDisconnect(socket.id);
       });
     });
     const PORT = process.env.PORT || 3001;

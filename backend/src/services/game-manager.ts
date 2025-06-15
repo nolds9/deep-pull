@@ -12,6 +12,7 @@ interface GameSession {
   startPlayer: Player;
   endPlayer: Player;
   status: "waiting" | "active" | "finished";
+  ready: Map<string, boolean>;
   winner?: string;
   winningPath?: string[];
   startTime?: Date;
@@ -29,11 +30,17 @@ export class GameManager {
   }
 
   async joinQueue(socketId: string) {
+    if (this.waitingPlayers.includes(socketId)) {
+      logger.warn(`Player ${socketId} is already in the queue.`);
+      return;
+    }
     this.waitingPlayers.push(socketId);
     logger.info(
       `Player joined queue: ${socketId}. Queue length: ${this.waitingPlayers.length}`
     );
-    if (this.waitingPlayers.length >= 2) {
+
+    // Process the queue as long as there are enough players
+    while (this.waitingPlayers.length >= 2) {
       await this.startGame();
     }
   }
@@ -62,7 +69,11 @@ export class GameManager {
       players: [player1, player2],
       startPlayer,
       endPlayer,
-      status: "active",
+      status: "waiting",
+      ready: new Map([
+        [player1, false],
+        [player2, false],
+      ]),
       startTime: new Date(),
     };
     this.activeSessions.set(sessionId, session);
@@ -110,11 +121,11 @@ export class GameManager {
         session.status = "finished";
         // Notify both players
         this.io.to(session.players[0]).emit("gameEnd", {
-          winner: socketId,
+          winnerId: socketId,
           winningPath: path,
         });
         this.io.to(session.players[1]).emit("gameEnd", {
-          winner: socketId,
+          winnerId: socketId,
           winningPath: path,
         });
         this.activeSessions.delete(sessionId);
@@ -154,5 +165,108 @@ export class GameManager {
       }
     }
     return true;
+  }
+
+  playerReady(socketId: string, sessionId: string) {
+    const session = this.activeSessions.get(sessionId);
+    if (!session || !session.players.includes(socketId)) {
+      logger.warn(
+        `Player ${socketId} tried to ready up for invalid session ${sessionId}`
+      );
+      return;
+    }
+
+    session.ready.set(socketId, true);
+    logger.info(`Player ${socketId} is ready in session ${sessionId}`);
+
+    // Notify the other player
+    const opponentId = session.players.find((p) => p !== socketId);
+    if (opponentId) {
+      this.io.to(opponentId).emit("opponentReady");
+      logger.info(`Notified opponent ${opponentId} that player is ready.`);
+    }
+
+    // Check if both players are ready
+    const allReady = Array.from(session.ready.values()).every(
+      (isReady) => isReady
+    );
+    if (allReady) {
+      logger.info(
+        `All players ready in session ${sessionId}. Starting countdown.`
+      );
+      session.status = "active"; // Game is now active
+      this.io.to(session.players[0]).emit("allPlayersReady");
+      this.io.to(session.players[1]).emit("allPlayersReady");
+    }
+  }
+
+  leaveQueue(socketId: string) {
+    const queueIndex = this.waitingPlayers.indexOf(socketId);
+    if (queueIndex > -1) {
+      this.waitingPlayers.splice(queueIndex, 1);
+      logger.info(
+        `Player ${socketId} removed from queue. New queue length: ${this.waitingPlayers.length}`
+      );
+    }
+  }
+
+  handleDisconnect(socketId: string) {
+    logger.info(`Handling disconnect for player: ${socketId}`);
+
+    // Remove player from the waiting queue if they are in it
+    const queueIndex = this.waitingPlayers.indexOf(socketId);
+    if (queueIndex > -1) {
+      this.waitingPlayers.splice(queueIndex, 1);
+      logger.info(
+        `Player ${socketId} removed from queue. New queue length: ${this.waitingPlayers.length}`
+      );
+    }
+
+    // Find if the player was in an active game
+    const sessionToCancel = Array.from(this.activeSessions.values()).find(
+      (session) => session.players.includes(socketId)
+    );
+
+    if (sessionToCancel) {
+      logger.info(
+        `Player ${socketId} was in active session ${sessionToCancel.id}. Ending game.`
+      );
+      const winnerId = sessionToCancel.players.find((p) => p !== socketId);
+      if (winnerId) {
+        // Formally end the game, declaring the remaining player the winner
+        this.io.to(winnerId).emit("gameEnd", {
+          winnerId: winnerId,
+          winningPath: ["opponent_disconnected"],
+        });
+        logger.info(
+          `Notified opponent ${winnerId} they won due to disconnect.`
+        );
+      }
+      this.activeSessions.delete(sessionToCancel.id);
+    }
+  }
+
+  forceEndGame(socketId: string, sessionId: string) {
+    const session = this.activeSessions.get(sessionId);
+    if (!session) {
+      logger.warn(`Session not found for forceEndGame: ${sessionId}`);
+      return;
+    }
+
+    // The player who didn't click the button is the "winner" in this simulation
+    const winnerId = session.players.find((p) => p !== socketId);
+
+    this.io.to(session.players[0]).emit("gameEnd", {
+      winnerId: winnerId,
+      winningPath: ["simulation"],
+    });
+    this.io.to(session.players[1]).emit("gameEnd", {
+      winnerId: winnerId,
+      winningPath: ["simulation"],
+    });
+    this.activeSessions.delete(sessionId);
+    logger.info(
+      `Game session ${sessionId} force-ended by ${socketId}. Winner: ${winnerId}`
+    );
   }
 }

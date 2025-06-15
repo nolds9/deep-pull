@@ -2,14 +2,30 @@ import React from "react";
 import { Box, Button, Typography, Stack } from "@mui/material";
 
 interface EndGameScreenProps {
+  isWinner: boolean;
+  reason?: string;
   onPlayAgain: () => void;
   onHome: () => void;
 }
 
 const EndGameScreen: React.FC<EndGameScreenProps> = ({
+  isWinner,
+  reason,
   onPlayAgain,
   onHome,
 }) => {
+  let title = "Game Over";
+  let subtitle: string | null = null;
+
+  if (reason === "opponent_disconnected") {
+    title = "Opponent Disconnected";
+    subtitle = "You win by default!";
+  } else if (isWinner) {
+    title = "You Win!";
+  } else {
+    title = "You Lose";
+  }
+
   return (
     <Box
       sx={{
@@ -23,8 +39,13 @@ const EndGameScreen: React.FC<EndGameScreenProps> = ({
       }}
     >
       <Typography variant="h4" color="white" gutterBottom>
-        Game Over (placeholder)
+        {title}
       </Typography>
+      {subtitle && (
+        <Typography variant="body1" color="white" gutterBottom>
+          {subtitle}
+        </Typography>
+      )}
       <Stack spacing={2} direction="row">
         <Button variant="contained" color="primary" onClick={onPlayAgain}>
           Play Again
