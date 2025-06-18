@@ -13,11 +13,17 @@ import {
 } from "@mui/material";
 import type { Player } from "../types";
 import { socket } from "../socket";
+import type { GameMode } from "../state/gameMachine";
 
 interface GameScreenProps {
   startPlayer: Player;
   endPlayer: Player;
+  sessionId: string;
   onPathSubmit: (path: string[]) => void;
+  mode?: GameMode;
+  strikes: number;
+  maxStrikes: number;
+  stopwatch: number;
 }
 
 const PathConnection: React.FC<{ type?: string }> = ({ type }) => (
@@ -29,7 +35,12 @@ const PathConnection: React.FC<{ type?: string }> = ({ type }) => (
 const GameScreen: React.FC<GameScreenProps> = ({
   startPlayer,
   endPlayer,
+  sessionId,
   onPathSubmit,
+  mode,
+  strikes,
+  maxStrikes,
+  stopwatch,
 }) => {
   const [path, setPath] = useState<Player[]>([startPlayer]);
   const [open, setOpen] = useState(false);
@@ -42,8 +53,12 @@ const GameScreen: React.FC<GameScreenProps> = ({
   } | null>(null);
 
   useEffect(() => {
-    const onInvalidPath = () => {
-      setFeedback({ type: "error", message: "That's not a valid connection!" });
+    const onInvalidPath = (data: { pathLength: number; strikes?: number }) => {
+      let message = "That's not a valid connection!";
+      if (data.strikes !== undefined) {
+        message += ` ${data.strikes} strikes remaining.`;
+      }
+      setFeedback({ type: "error", message });
       const timer = setTimeout(() => setFeedback(null), 3000);
       return () => clearTimeout(timer);
     };
@@ -163,6 +178,24 @@ const GameScreen: React.FC<GameScreenProps> = ({
         color: "white",
       }}
     >
+      <Stack
+        direction="row"
+        spacing={4}
+        sx={{ position: "absolute", top: 24, left: 24, right: 24 }}
+        justifyContent="space-between"
+      >
+        {mode === "single" && (
+          <Typography variant="h4" fontWeight={700}>
+            Time: {stopwatch.toFixed(0)}s
+          </Typography>
+        )}
+        {maxStrikes > 0 && maxStrikes !== Infinity && (
+          <Typography variant="h4" fontWeight={700}>
+            Strikes: {strikes}/{maxStrikes}
+          </Typography>
+        )}
+      </Stack>
+
       <Box sx={{ position: "absolute", top: 80, width: "100%", px: 2 }}>
         {feedback && (
           <Alert severity={feedback.type} sx={{ justifyContent: "center" }}>
@@ -284,6 +317,16 @@ const GameScreen: React.FC<GameScreenProps> = ({
           }}
         >
           Reset
+        </Button>
+        <Button
+          variant="contained"
+          color="error"
+          size="large"
+          onClick={() => {
+            socket.emit("giveUp", { sessionId });
+          }}
+        >
+          Give Up
         </Button>
       </Stack>
     </Box>

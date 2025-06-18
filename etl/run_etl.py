@@ -31,6 +31,7 @@ def main():
     
     print(f"\n🎉 ETL Complete!")
     print(f"Players loaded: {result['players_count']:,}")
+    print(f"Seasonal stats loaded: {result.get('seasonal_stats_count', 0):,}")
     print(f"Connections created: {result['connections_count']:,}")
     print(f"Duration: {result['duration_seconds']:.1f} seconds")
 

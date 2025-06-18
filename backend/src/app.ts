@@ -3,7 +3,7 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import { AppDataSource } from "./config";
-import { GameManager } from "./services/game-manager";
+import { Difficulty, GameManager } from "./services/game-manager";
 import * as dotenv from "dotenv";
 import playerRoutes from "./routes/player";
 import { logger } from "./utils/logger";
@@ -76,13 +76,21 @@ AppDataSource.initialize()
         return socket;
       };
       // Register game events
-      socket.on("joinQueue", () => gameManager.joinQueue(socket.id));
+      socket.on("joinQueue", (data: { difficulty: Difficulty }) =>
+        gameManager.joinQueue(socket.id, data.difficulty)
+      );
+      socket.on("startSinglePlayerGame", (data: { difficulty: Difficulty }) => {
+        gameManager.startSinglePlayerGame(socket.id, data.difficulty);
+      });
       socket.on("leaveQueue", () => gameManager.leaveQueue(socket.id));
       socket.on("playerReady", (data) =>
         gameManager.playerReady(socket.id, data.sessionId)
       );
       socket.on("submitPath", (data) =>
         gameManager.submitPath(data.sessionId, socket.id, data.path)
+      );
+      socket.on("giveUp", (data) =>
+        gameManager.handleGiveUp(socket.id, data.sessionId)
       );
       socket.on("forceEndGame", (data) => {
         gameManager.forceEndGame(socket.id, data.sessionId);
