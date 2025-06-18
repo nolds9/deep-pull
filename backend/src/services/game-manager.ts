@@ -3,27 +3,60 @@ import { Player } from "../entity/Player";
 import { AppDataSource } from "../config";
 import { PathfindingService } from "./pathfinding";
 import { v4 as uuidv4 } from "uuid";
-import { PlayerConnection } from "../entity/PlayerConnection";
 import { logger } from "../utils/logger";
 import { PlayerSeasonalStats } from "../entity/PlayerSeasonalStats";
 import { In } from "typeorm";
 
+export type GameMode = "single" | "multiplayer";
+export type Difficulty = "easy" | "medium" | "hard";
+
+const getConnectionTypesForDifficulty = (difficulty: Difficulty): string[] => {
+  switch (difficulty) {
+    case "easy":
+      return ["teammate", "college", "draft_class", "position"];
+    case "medium":
+      return ["teammate", "college"];
+    case "hard":
+      return ["teammate"];
+    default:
+      return [];
+  }
+};
+
+const getStrikesForDifficulty = (difficulty: Difficulty): number => {
+  switch (difficulty) {
+    case "easy":
+      return 10;
+    case "medium":
+      return 5;
+    case "hard":
+      return 3;
+    default:
+      return Infinity;
+  }
+};
+
 interface GameSession {
   id: string;
-  players: [string, string]; // socket IDs
+  mode: GameMode;
+  difficulty: Difficulty;
+  players: string[]; // socket IDs
   startPlayer: Player;
   endPlayer: Player;
   status: "waiting" | "active" | "finished";
   ready: Map<string, boolean>;
   winner?: string;
   winningPath?: string[];
-  startTime?: Date;
+  startTime: number; // Unix timestamp
   timerId?: NodeJS.Timeout;
+  // For modes with limited guesses
+  strikes?: number;
+  maxStrikes?: number;
 }
 
 export class GameManager {
   private activeSessions = new Map<string, GameSession>();
-  private waitingPlayers: string[] = [];
+  private waitingPlayers: { socketId: string; difficulty: Difficulty }[] = [];
   private pathfinding: PathfindingService;
   private io: Server;
 
@@ -32,249 +65,442 @@ export class GameManager {
     this.pathfinding = new PathfindingService();
   }
 
-  async joinQueue(socketId: string) {
-    if (this.waitingPlayers.includes(socketId)) {
+  async joinQueue(socketId: string, difficulty: Difficulty) {
+    if (this.waitingPlayers.some((p) => p.socketId === socketId)) {
       logger.warn(`Player ${socketId} is already in the queue.`);
       return;
     }
-    this.waitingPlayers.push(socketId);
+    this.waitingPlayers.push({ socketId, difficulty });
     logger.info(
-      `Player joined queue: ${socketId}. Queue length: ${this.waitingPlayers.length}`
+      `Player joined queue: ${socketId} with difficulty ${difficulty}. Queue length: ${this.waitingPlayers.length}`
     );
 
     // Process the queue as long as there are enough players
     while (this.waitingPlayers.length >= 2) {
-      await this.startGame();
+      // For now, match any two players. A real system might match by difficulty.
+      await this.startMultiplayerGame();
     }
   }
 
-  private async startGame() {
-    const [player1, player2] = this.waitingPlayers.splice(0, 2);
+  private async startMultiplayerGame() {
+    const [p1_data, p2_data] = this.waitingPlayers.splice(0, 2);
+    // For now, we'll use the first player's difficulty for the match
+    const difficulty = p1_data.difficulty;
+    const { socketId: player1 } = p1_data;
+    const { socketId: player2 } = p2_data;
+
+    const { startPlayer, endPlayer } = await this._selectPlayersForGame(
+      difficulty
+    );
+
+    if (!startPlayer || !endPlayer) {
+      // Could not find a valid game, requeue players
+      logger.error(
+        `Could not find valid start/end players for difficulty ${difficulty}. Re-queueing players.`
+      );
+      this.waitingPlayers.push(p1_data, p2_data);
+      // Maybe notify players? For now, they just wait longer.
+      return;
+    }
+
     const sessionId = uuidv4();
     logger.info(
-      `Starting game: sessionId=${sessionId}, players=[${player1}, ${player2}]`
+      `Starting MULTIPLAYER game: sessionId=${sessionId}, players=[${player1}, ${player2}], difficulty=${difficulty}`
     );
-    // Pick random start/end players from a pool of significant players
-    const significantPlayerIds = await AppDataSource.getRepository(
-      PlayerSeasonalStats
-    )
+    this.createSession(
+      sessionId,
+      [player1, player2],
+      "multiplayer",
+      difficulty,
+      startPlayer,
+      endPlayer
+    );
+  }
+
+  async startSinglePlayerGame(socketId: string, difficulty: Difficulty) {
+    const { startPlayer, endPlayer } = await this._selectPlayersForGame(
+      difficulty
+    );
+    if (!startPlayer || !endPlayer) {
+      this.io.to(socketId).emit("gameCreationError", {
+        message:
+          "Could not create a game for this difficulty. Please try again.",
+      });
+      return;
+    }
+
+    const sessionId = uuidv4();
+    logger.info(
+      `Starting SINGLE PLAYER game: sessionId=${sessionId}, player=${socketId}, difficulty=${difficulty}`
+    );
+    this.createSession(
+      sessionId,
+      [socketId],
+      "single",
+      difficulty,
+      startPlayer,
+      endPlayer
+    );
+  }
+
+  private async _getPlayerIdsByFantasyTier(
+    minPoints: number,
+    maxPoints: number | null = null
+  ): Promise<string[]> {
+    const qb = AppDataSource.getRepository(PlayerSeasonalStats)
       .createQueryBuilder("stats")
       .select("stats.player_id", "player_id")
-      .where("stats.fantasy_points_ppr > :minPoints", { minPoints: 50 })
-      .distinct(true)
-      .getRawMany();
+      .where("stats.fantasy_points_ppr >= :min", { min: minPoints });
 
-    if (significantPlayerIds.length < 2) {
-      logger.error(
-        "Not enough significant players found in the database. Falling back to all players."
-      );
-      // Fallback to old logic if not enough significant players
-      const allPlayers = await AppDataSource.getRepository(Player).find();
-      const getRandomPlayer = () =>
-        allPlayers[Math.floor(Math.random() * allPlayers.length)];
-      let startPlayer = getRandomPlayer();
-      let endPlayer = getRandomPlayer();
-      while (endPlayer.id === startPlayer.id) {
-        endPlayer = getRandomPlayer();
-      }
-      this.createSession(sessionId, player1, player2, startPlayer, endPlayer);
-      return;
+    if (maxPoints) {
+      qb.andWhere("stats.fantasy_points_ppr < :max", { max: maxPoints });
     }
 
-    const playerIds = significantPlayerIds.map((r) => r.player_id);
+    const results = await qb.distinct(true).getRawMany();
+    return results.map((r) => r.player_id);
+  }
 
+  private async _selectPlayersForGame(
+    difficulty: Difficulty
+  ): Promise<{ startPlayer?: Player; endPlayer?: Player }> {
     const playerRepo = AppDataSource.getRepository(Player);
-    const significantPlayers = await playerRepo.find({
-      where: {
-        id: In(playerIds),
-      },
-    });
+    let playerPoolIds: string[] = [];
 
-    if (significantPlayers.length < 2) {
-      logger.error(
-        "Could not find player details for significant players. Aborting game start."
+    // 1. Get a pool of player IDs based on difficulty
+    switch (difficulty) {
+      case "easy":
+        // Star players: > 150 PPR points in a season
+        playerPoolIds = await this._getPlayerIdsByFantasyTier(150);
+        logger.info(
+          `Selected ${playerPoolIds.length} players for EASY pool (PPR > 150)`
+        );
+        break;
+      case "medium":
+        // Significant starters: 75-150 PPR points
+        playerPoolIds = await this._getPlayerIdsByFantasyTier(75, 150);
+        logger.info(
+          `Selected ${playerPoolIds.length} players for MEDIUM pool (75 < PPR < 150)`
+        );
+        break;
+      case "hard":
+        // Any player with a recorded season: > 1 PPR point
+        playerPoolIds = await this._getPlayerIdsByFantasyTier(1);
+        logger.info(
+          `Selected ${playerPoolIds.length} players for HARD pool (PPR > 1)`
+        );
+        break;
+    }
+
+    // 2. Fallback logic if a pool is too small
+    if (playerPoolIds.length < 10) {
+      logger.warn(
+        `Player pool for ${difficulty} is too small (${playerPoolIds.length}). Falling back to significant players.`
       );
-      return;
+      playerPoolIds = await this._getPlayerIdsByFantasyTier(50);
+    }
+    if (playerPoolIds.length < 10) {
+      logger.warn(
+        `Fallback pool is still too small. Falling back to all players.`
+      );
+      const allPlayers = await playerRepo.find({ select: ["id"] });
+      playerPoolIds = allPlayers.map((p) => p.id);
     }
 
-    const getRandomPlayer = () =>
-      significantPlayers[Math.floor(Math.random() * significantPlayers.length)];
-
-    let startPlayer = getRandomPlayer();
-    let endPlayer = getRandomPlayer();
-    while (endPlayer.id === startPlayer.id) {
-      endPlayer = getRandomPlayer();
+    // 3. Load the actual player data for the selected pool
+    const playerPool = await playerRepo.findBy({ id: In(playerPoolIds) });
+    if (playerPool.length < 2) {
+      logger.error("Not enough players in the database to start a game.");
+      return {};
     }
-    this.createSession(sessionId, player1, player2, startPlayer, endPlayer);
+
+    // 4. Find a valid pair from the pool
+    const allowedConnectionTypes = getConnectionTypesForDifficulty(difficulty);
+    let attempts = 0;
+    const maxAttempts = 50; // Increased attempts to find a pair
+    while (attempts < maxAttempts) {
+      const p1 = playerPool[Math.floor(Math.random() * playerPool.length)];
+      const p2 = playerPool[Math.floor(Math.random() * playerPool.length)];
+
+      if (p1.id === p2.id) continue;
+
+      attempts++;
+
+      try {
+        const path = await this.pathfinding.findShortestPath(
+          p1.id,
+          p2.id,
+          allowedConnectionTypes
+        );
+
+        if (path.length > 0) {
+          // NEW: For medium/hard, ensure path is not a direct 1-step connection
+          if (difficulty === "medium" || difficulty === "hard") {
+            if (path.length <= 2) {
+              // Path length of 2 means [start, end], which is 1 connection
+              logger.info(
+                `[PlayerSelect] Rejecting 1-step path for ${difficulty} mode: ${p1.name} -> ${p2.name}`
+              );
+              continue; // try another pair
+            }
+          }
+          logger.info(
+            `[PlayerSelect] Found valid pair for ${difficulty}: ${p1.name} -> ${p2.name} (path length: ${path.length})`
+          );
+          return { startPlayer: p1, endPlayer: p2 };
+        }
+      } catch (e) {
+        logger.error(`[PlayerSelect] Error finding path for pair: ${e}`);
+        // Continue to next attempt
+      }
+    }
+
+    logger.error(
+      `Could not find a valid player pair for ${difficulty} after ${maxAttempts} attempts.`
+    );
+    return {};
   }
 
   private createSession(
     sessionId: string,
-    player1: string,
-    player2: string,
+    players: string[],
+    mode: GameMode,
+    difficulty: Difficulty,
     startPlayer: Player,
     endPlayer: Player
   ) {
     logger.info(
-      `Game session ${sessionId}: startPlayer=${startPlayer.name} (${startPlayer.id}), endPlayer=${endPlayer.name} (${endPlayer.id})`
+      `Game session ${sessionId}: startPlayer=${startPlayer.name}, endPlayer=${endPlayer.name}`
     );
 
     const session: GameSession = {
       id: sessionId,
-      players: [player1, player2],
+      players,
+      mode,
+      difficulty,
       startPlayer,
       endPlayer,
-      status: "waiting",
-      ready: new Map([
-        [player1, false],
-        [player2, false],
-      ]),
-      startTime: new Date(),
+      status: mode === "single" ? "active" : "waiting",
+      ready: new Map(players.map((p) => [p, false])),
+      startTime: Date.now(),
+      strikes: getStrikesForDifficulty(difficulty),
+      maxStrikes: getStrikesForDifficulty(difficulty),
     };
+
+    if (mode === "multiplayer") {
+      session.timerId = setTimeout(() => {
+        this.handleTimeout(sessionId);
+      }, (60 + 5) * 1000); // Give 5s for lobby/countdown
+    }
+
     this.activeSessions.set(sessionId, session);
-    // Notify both players
-    this.io.to(player1).emit("gameStart", {
-      sessionId,
-      startPlayer,
-      endPlayer,
-      opponent: player2,
+
+    // Notify all players in the session
+    players.forEach((socketId) => {
+      this.io.to(socketId).emit("gameStart", {
+        sessionId,
+        startPlayer,
+        endPlayer,
+        mode,
+        difficulty,
+        opponent:
+          mode === "multiplayer" ? players.find((p) => p !== socketId) : null,
+      });
     });
-    this.io.to(player2).emit("gameStart", {
-      sessionId,
-      startPlayer,
-      endPlayer,
-      opponent: player1,
-    });
+
     logger.info(`Game session ${sessionId} started and notified players.`);
   }
 
   async submitPath(sessionId: string, socketId: string, path: string[]) {
-    logger.info(
-      `Path submitted: sessionId=${sessionId}, socketId=${socketId}, path=${JSON.stringify(
-        path
-      )}`
-    );
+    logger.info(`Path submitted: sessionId=${sessionId}, socketId=${socketId}`);
     const session = this.activeSessions.get(sessionId);
     if (!session || session.status !== "active") {
-      logger.warn(
-        `Invalid or inactive session for path submission: sessionId=${sessionId}`
-      );
+      logger.warn(`Inactive session for path submission: ${sessionId}`);
       return;
     }
 
-    const opponentId = session.players.find((p) => p !== socketId);
+    const allowedConnectionTypes = getConnectionTypesForDifficulty(
+      session.difficulty
+    );
+    const isValid = await this.pathfinding.validatePath(
+      path,
+      session.startPlayer.id,
+      session.endPlayer.id,
+      allowedConnectionTypes
+    );
 
-    try {
-      const isValid = await this.pathfinding.validatePath(
-        path,
-        session.startPlayer.id,
-        session.endPlayer.id
-      );
-      logger.info(
-        `Path validation result for session ${sessionId}: ${isValid}`
-      );
-      if (isValid) {
-        session.winner = socketId;
-        session.winningPath = path;
-        session.status = "finished";
-
-        if (opponentId) {
-          this.io.to(opponentId).emit("opponentAttemptedPath", {
-            success: true,
-            pathLength: path.length,
-          });
-        }
-
-        const winningPathWithNames = (
-          await this.pathfinding.convertIdsToNames([path])
-        )[0];
-
-        // The winner sees their own path.
-        this.io.to(socketId).emit("gameEnd", {
-          winnerId: socketId,
-          winningPath: winningPathWithNames,
-        });
-
-        // The loser sees the winning path and up to 3 solution paths.
-        if (opponentId) {
-          const solutionPaths = await this.pathfinding.findShortestPaths(
-            session.startPlayer.id,
-            session.endPlayer.id,
-            3
-          );
-          const solutionPathsWithNames =
-            await this.pathfinding.convertIdsToNames(solutionPaths);
-          this.io.to(opponentId).emit("gameEnd", {
-            winnerId: socketId,
-            winningPath: winningPathWithNames,
-            solutionPaths: solutionPathsWithNames,
-          });
-        }
-
-        if (session.timerId) clearTimeout(session.timerId);
-        this.activeSessions.delete(sessionId);
-        logger.info(`Game session ${sessionId} finished. Winner: ${socketId}`);
+    if (isValid) {
+      if (session.mode === "single") {
+        this.handleSinglePlayerWin(session, path);
       } else {
-        // The path is not valid, notify the player.
-        this.io.to(socketId).emit("invalidPath", { pathLength: path.length });
-        if (opponentId) {
-          this.io.to(opponentId).emit("opponentAttemptedPath", {
-            success: false,
-            pathLength: path.length,
-          });
-        }
-        logger.info(
-          `Invalid path submitted by ${socketId} for session ${sessionId}`
-        );
+        this.handleMultiplayerWin(session, socketId, path);
       }
-    } catch (err) {
-      logger.error(
-        `Error during path submission for session ${sessionId}: ${err}`
-      );
+    } else {
+      this.handleInvalidPath(session, socketId, path.length);
     }
+  }
+
+  private handleInvalidPath(
+    session: GameSession,
+    socketId: string,
+    pathLength: number
+  ) {
+    // Decrement strikes only if the mode has them
+    if (session.strikes !== undefined && session.maxStrikes !== undefined) {
+      session.strikes--;
+      this.io.to(socketId).emit("invalidPath", {
+        pathLength,
+        strikes: session.strikes,
+      });
+
+      // Let opponent know about the attempt
+      const opponentId = session.players.find((p) => p !== socketId);
+      if (opponentId) {
+        this.io
+          .to(opponentId)
+          .emit("opponentAttemptedPath", { success: false, pathLength });
+      }
+
+      if (session.strikes <= 0) {
+        logger.info(
+          `Player ${socketId} in session ${session.id} ran out of strikes.`
+        );
+        this._endGame(session, "out_of_strikes", opponentId);
+      }
+    } else {
+      // No strikes in this mode, just send invalid path event
+      this.io.to(socketId).emit("invalidPath", { pathLength });
+      // Let opponent know about the attempt
+      const opponentId = session.players.find((p) => p !== socketId);
+      if (opponentId) {
+        this.io
+          .to(opponentId)
+          .emit("opponentAttemptedPath", { success: false, pathLength });
+      }
+    }
+  }
+
+  private async handleSinglePlayerWin(session: GameSession, path: string[]) {
+    const timeElapsed = (Date.now() - session.startTime) / 1000;
+    const score = Math.max(
+      0,
+      10000 - Math.floor(timeElapsed * 10) - (path.length - 1) * 100
+    );
+
+    const winningPathWithNames = (
+      await this.pathfinding.convertIdsToNames([path])
+    )[0];
+
+    logger.info(
+      `Single player game ${session.id} won. Score: ${score}, Time: ${timeElapsed}s`
+    );
+
+    this.io.to(session.players[0]).emit("gameEnd", {
+      winnerId: session.players[0],
+      reason: "path_found",
+      winningPath: winningPathWithNames,
+      score,
+      time: timeElapsed,
+    });
+
+    this.activeSessions.delete(session.id);
+  }
+
+  private async handleMultiplayerWin(
+    session: GameSession,
+    winnerId: string,
+    path: string[]
+  ) {
+    session.winner = winnerId;
+    session.winningPath = path;
+    session.status = "finished";
+
+    const opponentId = session.players.find((p) => p !== winnerId);
+    if (opponentId) {
+      this.io.to(opponentId).emit("opponentAttemptedPath", {
+        success: true,
+        pathLength: path.length,
+      });
+    }
+
+    const winningPathWithNames = (
+      await this.pathfinding.convertIdsToNames([path])
+    )[0];
+
+    // Winner
+    this.io.to(winnerId).emit("gameEnd", {
+      winnerId: winnerId,
+      reason: "path_found",
+      winningPath: winningPathWithNames,
+    });
+
+    // Loser
+    if (opponentId) {
+      const solutionPaths = await this.findAndEmitSolutions(session, 3);
+      this.io.to(opponentId).emit("gameEnd", {
+        winnerId: winnerId,
+        reason: "path_found",
+        winningPath: winningPathWithNames,
+        solutionPaths,
+      });
+    }
+
+    if (session.timerId) clearTimeout(session.timerId);
+    this.activeSessions.delete(session.id);
+    logger.info(`Multiplayer game ${session.id} finished. Winner: ${winnerId}`);
+  }
+
+  private async findAndEmitSolutions(
+    session: GameSession,
+    limit: number = 3
+  ): Promise<string[][]> {
+    const solutionPathsById = await this.pathfinding.findShortestPaths(
+      session.startPlayer.id,
+      session.endPlayer.id,
+      limit,
+      getConnectionTypesForDifficulty(session.difficulty)
+    );
+    const solutionPathsByName = await this.pathfinding.convertIdsToNames(
+      solutionPathsById
+    );
+
+    // Deduplicate paths after converting to names
+    const uniquePathsByName = Array.from(
+      new Set(solutionPathsByName.map((p) => JSON.stringify(p)))
+    ).map((s) => JSON.parse(s));
+
+    return uniquePathsByName;
   }
 
   playerReady(socketId: string, sessionId: string) {
     const session = this.activeSessions.get(sessionId);
     if (!session || !session.players.includes(socketId)) {
-      logger.warn(
-        `Player ${socketId} tried to ready up for invalid session ${sessionId}`
-      );
       return;
     }
+    if (session.mode !== "multiplayer") return;
 
     session.ready.set(socketId, true);
     logger.info(`Player ${socketId} is ready in session ${sessionId}`);
 
-    // Notify the other player
     const opponentId = session.players.find((p) => p !== socketId);
     if (opponentId) {
       this.io.to(opponentId).emit("opponentReady");
-      logger.info(`Notified opponent ${opponentId} that player is ready.`);
     }
 
-    // Check if both players are ready
-    const allReady = Array.from(session.ready.values()).every(
-      (isReady) => isReady
-    );
+    const allReady = Array.from(session.ready.values()).every((r) => r);
     if (allReady) {
       logger.info(
         `All players ready in session ${sessionId}. Starting countdown.`
       );
-      session.status = "active"; // Game is now active
-
-      // Start a server-side timer
-      session.timerId = setTimeout(() => {
-        this.handleTimeout(sessionId);
-      }, (60 + 3) * 1000); // 60s game + 3s countdown
-
+      session.status = "active";
       this.io.to(session.players[0]).emit("allPlayersReady");
       this.io.to(session.players[1]).emit("allPlayersReady");
     }
   }
 
   leaveQueue(socketId: string) {
-    const queueIndex = this.waitingPlayers.indexOf(socketId);
+    const queueIndex = this.waitingPlayers.findIndex(
+      (p) => p.socketId === socketId
+    );
     if (queueIndex > -1) {
       this.waitingPlayers.splice(queueIndex, 1);
       logger.info(
@@ -285,22 +511,13 @@ export class GameManager {
 
   handleDisconnect(socketId: string) {
     logger.info(`Handling disconnect for player: ${socketId}`);
+    this.leaveQueue(socketId);
 
-    // Remove player from the waiting queue if they are in it
-    const queueIndex = this.waitingPlayers.indexOf(socketId);
-    if (queueIndex > -1) {
-      this.waitingPlayers.splice(queueIndex, 1);
-      logger.info(
-        `Player ${socketId} removed from queue. New queue length: ${this.waitingPlayers.length}`
-      );
-    }
-
-    // Find if the player was in an active game
     const sessionToCancel = Array.from(this.activeSessions.values()).find(
       (session) => session.players.includes(socketId)
     );
 
-    if (sessionToCancel) {
+    if (sessionToCancel && sessionToCancel.mode === "multiplayer") {
       logger.info(
         `Player ${socketId} was in active session ${sessionToCancel.id}. Ending game.`
       );
@@ -308,7 +525,6 @@ export class GameManager {
 
       const winnerId = sessionToCancel.players.find((p) => p !== socketId);
       if (winnerId) {
-        // Formally end the game, declaring the remaining player the winner
         this.io.to(winnerId).emit("gameEnd", {
           winnerId: winnerId,
           winningPath: ["opponent_disconnected"],
@@ -318,60 +534,32 @@ export class GameManager {
         );
       }
       this.activeSessions.delete(sessionToCancel.id);
+    } else if (sessionToCancel) {
+      // Single player game, just remove the session
+      this.activeSessions.delete(sessionToCancel.id);
+      logger.info(`Single player session ${sessionToCancel.id} removed.`);
     }
   }
 
   forceEndGame(socketId: string, sessionId: string) {
+    // This is a debug/testing method, can be removed for production
     const session = this.activeSessions.get(sessionId);
-    if (!session) {
-      logger.warn(`Session not found for forceEndGame: ${sessionId}`);
-      return;
-    }
+    if (!session) return;
 
-    // The player who didn't click the button is the "winner" in this simulation
-    const winnerId = session.players.find((p) => p !== socketId);
-
-    this.io.to(session.players[0]).emit("gameEnd", {
-      winnerId: winnerId,
-      winningPath: ["simulation"],
-    });
-    this.io.to(session.players[1]).emit("gameEnd", {
-      winnerId: winnerId,
-      winningPath: ["simulation"],
-    });
-    this.activeSessions.delete(sessionId);
-    logger.info(
-      `Game session ${sessionId} force-ended by ${socketId}. Winner: ${winnerId}`
+    const winnerId = session.players.find((p) => p !== socketId) || "none";
+    session.players.forEach((p) =>
+      this.io.to(p).emit("gameEnd", { winnerId, winningPath: ["simulation"] })
     );
+    this.activeSessions.delete(sessionId);
   }
 
   async handleTimeout(sessionId: string) {
     const session = this.activeSessions.get(sessionId);
-    if (!session || session.status !== "active") {
-      logger.warn(
-        `Timeout for an already finished or invalid session: ${sessionId}`
-      );
-      return;
-    }
+    if (!session || session.status !== "active") return;
 
     logger.info(`Game session ${sessionId} timed out.`);
     session.status = "finished";
-    let solutionPathsWithNames: string[][] = [];
-
-    try {
-      const solutionPaths = await this.pathfinding.findShortestPaths(
-        session.startPlayer.id,
-        session.endPlayer.id,
-        3
-      );
-      solutionPathsWithNames = await this.pathfinding.convertIdsToNames(
-        solutionPaths
-      );
-    } catch (error) {
-      logger.error(
-        `Error finding solution paths for session ${sessionId}: ${error}`
-      );
-    }
+    const solutionPathsWithNames = await this.findAndEmitSolutions(session, 3);
 
     const gameEndPayload = {
       winnerId: null, // No winner on timeout
@@ -379,9 +567,65 @@ export class GameManager {
       solutionPaths: solutionPathsWithNames,
     };
 
-    this.io.to(session.players[0]).emit("gameEnd", gameEndPayload);
-    this.io.to(session.players[1]).emit("gameEnd", gameEndPayload);
-
+    session.players.forEach((p) =>
+      this.io.to(p).emit("gameEnd", gameEndPayload)
+    );
     this.activeSessions.delete(sessionId);
+  }
+
+  handleGiveUp(socketId: string, sessionId: string) {
+    const session = this.activeSessions.get(sessionId);
+    if (
+      !session ||
+      !session.players.includes(socketId) ||
+      session.status !== "active"
+    ) {
+      logger.warn(
+        `Invalid 'giveUp' request for session ${sessionId} from ${socketId}`
+      );
+      return;
+    }
+    logger.info(`Player ${socketId} gave up in session ${session.id}`);
+
+    if (session.mode === "single") {
+      this._endGame(session, "gave_up"); // No winner
+    } else if (session.mode === "multiplayer") {
+      const winnerId = session.players.find((p) => p !== socketId);
+      this._endGame(session, "gave_up", winnerId);
+    }
+  }
+
+  private async _endGame(
+    session: GameSession,
+    reason: string,
+    winnerId?: string
+  ) {
+    if (session.status === "finished") return; // Already ended
+
+    logger.info(
+      `Ending game ${session.id}. Reason: ${reason}, Winner: ${winnerId}`
+    );
+    session.status = "finished";
+    if (session.timerId) {
+      clearTimeout(session.timerId);
+    }
+
+    const solutionPaths = await this.findAndEmitSolutions(session);
+
+    session.players.forEach((playerSocketId) => {
+      let finalReason = reason;
+      // If there's a winner and this player is the winner, tell them their opponent gave up.
+      if (reason === "gave_up" && winnerId && playerSocketId === winnerId) {
+        finalReason = "opponent_gave_up";
+      }
+
+      this.io.to(playerSocketId).emit("gameEnd", {
+        winnerId: winnerId,
+        reason: finalReason,
+        solutionPaths,
+      });
+    });
+
+    this.activeSessions.delete(session.id);
   }
 }

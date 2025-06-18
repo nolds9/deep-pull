@@ -1,29 +1,27 @@
 import React from "react";
 import { Box, Button, Typography, Stack } from "@mui/material";
-import { socket } from "../socket";
+import type { GameMode } from "../state/gameMachine";
 
 interface QueueScreenProps {
   onBack: () => void;
+  mode?: GameMode;
 }
 
-const QueueScreen: React.FC<QueueScreenProps> = ({ onBack }) => {
+const QueueScreen: React.FC<QueueScreenProps> = ({ onBack, mode }) => {
   const [dots, setDots] = React.useState("");
 
   React.useEffect(() => {
-    // When the component mounts, emit an event to join the server queue.
-    socket.emit("joinQueue");
-    console.log("Emitted joinQueue event");
-
     const interval = setInterval(() => {
       setDots((prev) => (prev.length < 3 ? prev + "." : ""));
     }, 500);
 
     return () => {
       clearInterval(interval);
-      socket.emit("leaveQueue");
-      console.log("Emitted leaveQueue event");
     };
   }, []);
+
+  const text =
+    mode === "multiplayer" ? "Waiting for opponent" : "Creating your game";
 
   return (
     <Box
@@ -38,7 +36,8 @@ const QueueScreen: React.FC<QueueScreenProps> = ({ onBack }) => {
       }}
     >
       <Typography variant="h4" color="white" gutterBottom>
-        Waiting for opponent{dots}
+        {text}
+        {dots}
       </Typography>
       <Stack spacing={2} direction="row">
         <Button variant="outlined" color="secondary" onClick={onBack}>
