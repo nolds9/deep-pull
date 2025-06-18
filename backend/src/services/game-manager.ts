@@ -5,6 +5,8 @@ import { PathfindingService } from "./pathfinding";
 import { v4 as uuidv4 } from "uuid";
 import { PlayerConnection } from "../entity/PlayerConnection";
 import { logger } from "../utils/logger";
+import { PlayerSeasonalStats } from "../entity/PlayerSeasonalStats";
+import { In } from "typeorm";
 
 interface GameSession {
   id: string;
@@ -52,16 +54,67 @@ export class GameManager {
     logger.info(
       `Starting game: sessionId=${sessionId}, players=[${player1}, ${player2}]`
     );
-    // Pick random start/end players from skill positions
+    // Pick random start/end players from a pool of significant players
+    const significantPlayerIds = await AppDataSource.getRepository(
+      PlayerSeasonalStats
+    )
+      .createQueryBuilder("stats")
+      .select("stats.player_id", "player_id")
+      .where("stats.fantasy_points_ppr > :minPoints", { minPoints: 50 })
+      .distinct(true)
+      .getRawMany();
+
+    if (significantPlayerIds.length < 2) {
+      logger.error(
+        "Not enough significant players found in the database. Falling back to all players."
+      );
+      // Fallback to old logic if not enough significant players
+      const allPlayers = await AppDataSource.getRepository(Player).find();
+      const getRandomPlayer = () =>
+        allPlayers[Math.floor(Math.random() * allPlayers.length)];
+      let startPlayer = getRandomPlayer();
+      let endPlayer = getRandomPlayer();
+      while (endPlayer.id === startPlayer.id) {
+        endPlayer = getRandomPlayer();
+      }
+      this.createSession(sessionId, player1, player2, startPlayer, endPlayer);
+      return;
+    }
+
+    const playerIds = significantPlayerIds.map((r) => r.player_id);
+
     const playerRepo = AppDataSource.getRepository(Player);
-    const allPlayers = await playerRepo.find();
+    const significantPlayers = await playerRepo.find({
+      where: {
+        id: In(playerIds),
+      },
+    });
+
+    if (significantPlayers.length < 2) {
+      logger.error(
+        "Could not find player details for significant players. Aborting game start."
+      );
+      return;
+    }
+
     const getRandomPlayer = () =>
-      allPlayers[Math.floor(Math.random() * allPlayers.length)];
+      significantPlayers[Math.floor(Math.random() * significantPlayers.length)];
+
     let startPlayer = getRandomPlayer();
     let endPlayer = getRandomPlayer();
     while (endPlayer.id === startPlayer.id) {
       endPlayer = getRandomPlayer();
     }
+    this.createSession(sessionId, player1, player2, startPlayer, endPlayer);
+  }
+
+  private createSession(
+    sessionId: string,
+    player1: string,
+    player2: string,
+    startPlayer: Player,
+    endPlayer: Player
+  ) {
     logger.info(
       `Game session ${sessionId}: startPlayer=${startPlayer.name} (${startPlayer.id}), endPlayer=${endPlayer.name} (${endPlayer.id})`
     );
