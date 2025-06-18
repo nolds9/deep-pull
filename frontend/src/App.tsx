@@ -1,10 +1,27 @@
 import React from "react";
-import { ThemeProvider, CssBaseline, createTheme, Box } from "@mui/material";
+import {
+  ThemeProvider,
+  CssBaseline,
+  createTheme,
+  Box,
+  AppBar,
+  Toolbar,
+  Typography,
+  Button,
+} from "@mui/material";
 import { useMachine } from "@xstate/react";
 import { gameMachine } from "./state/gameMachine";
 import type { GameEvent } from "./state/gameMachine";
 import { socket } from "./socket";
 import { AnimatePresence, motion } from "motion/react";
+import {
+  SignedIn,
+  SignedOut,
+  SignInButton,
+  UserButton,
+  useAuth,
+  useUser,
+} from "@clerk/clerk-react";
 
 import HomeScreen from "./screens/HomeScreen";
 import QueueScreen from "./screens/QueueScreen";
@@ -15,6 +32,7 @@ import HowToPlayScreen from "./screens/HowToPlayScreen";
 import Countdown from "./components/Countdown";
 import GameTimer from "./components/GameTimer";
 import ModeScreen from "./screens/ModeScreen";
+import ProfileScreen from "./screens/ProfileScreen";
 
 const theme = createTheme();
 
@@ -22,12 +40,66 @@ const theme = createTheme();
 type GameStartData = Extract<GameEvent, { type: "GAME_START" }>["data"];
 type GameEndData = Extract<GameEvent, { type: "GAME_END" }>["data"];
 
+const Header = () => {
+  return (
+    <AppBar position="static" color="transparent" elevation={0}>
+      <Toolbar>
+        <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
+          Player Rush
+        </Typography>
+        <SignedIn>
+          <UserButton afterSignOutUrl="/" />
+        </SignedIn>
+        <SignedOut>
+          <SignInButton mode="modal">
+            <Button color="inherit">Sign In</Button>
+          </SignInButton>
+        </SignedOut>
+      </Toolbar>
+    </AppBar>
+  );
+};
+
 export default function App() {
   const [state, send] = useMachine(gameMachine);
+  const { isSignedIn, getToken } = useAuth();
+  const { user } = useUser();
+
+  React.useEffect(() => {
+    // Effect to manage socket connection based on auth state
+    const manageSocketConnection = async () => {
+      if (isSignedIn) {
+        console.log("User is signed in, configuring socket...");
+        const token = await getToken();
+        if (token) {
+          // Sync user with backend
+          fetch("http://localhost:3001/api/user/me", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          socket.auth = { token };
+        }
+
+        if (socket.disconnected) {
+          socket.connect();
+        }
+      } else {
+        console.log("User is not signed in, disconnecting socket.");
+        if (socket.connected) {
+          socket.disconnect();
+        }
+      }
+    };
+    manageSocketConnection();
+  }, [isSignedIn, getToken]);
 
   React.useEffect(() => {
     // This effect handles emitting socket events when the state machine requests it
     if (state.value === "loading" && state.context.difficulty) {
+      if (!isSignedIn) {
+        console.error("Attempted to start a game while not signed in.");
+        send({ type: "BACK" }); // Or a more specific event
+        return;
+      }
       if (state.context.mode === "single") {
         socket.emit("startSinglePlayerGame", {
           difficulty: state.context.difficulty,
@@ -36,7 +108,13 @@ export default function App() {
         socket.emit("joinQueue", { difficulty: state.context.difficulty });
       }
     }
-  }, [state.value, state.context.mode, state.context.difficulty]);
+  }, [
+    state.value,
+    state.context.mode,
+    state.context.difficulty,
+    isSignedIn,
+    send,
+  ]);
 
   React.useEffect(() => {
     const onConnect = () => console.log("Socket connected:", socket.id);
@@ -75,15 +153,33 @@ export default function App() {
     };
   }, [send]);
 
+  React.useEffect(() => {
+    // This effect can be used to handle navigation for the UserButton
+    if (window.location.pathname === "/profile" && state.value !== "profile") {
+      send({ type: "VIEW_PROFILE" });
+    }
+  }, [state.value, send]);
+
   let content = null;
 
   if (state.matches("home")) {
     content = (
       <HomeScreen
-        onPlay={() => send({ type: "PLAY" })}
+        onPlay={() => {
+          if (isSignedIn) {
+            send({ type: "PLAY" });
+          } else {
+            // In a real app, you might trigger the sign-in modal here
+            // For now, the button will be handled by Clerk's components
+            console.log("Please sign in to play.");
+          }
+        }}
         onHowToPlay={() => send({ type: "HOW_TO_PLAY" })}
+        isSignedIn={isSignedIn}
       />
     );
+  } else if (state.matches("profile")) {
+    content = <ProfileScreen onBack={() => send({ type: "BACK" })} />;
   } else if (state.matches("modeSelection")) {
     content = (
       <ModeScreen
@@ -151,7 +247,7 @@ export default function App() {
     content = (
       <EndGameScreen
         isWinner={
-          state.context.winnerId === socket.id ||
+          state.context.winnerId === user?.id || // Compare with Clerk user ID
           (state.context.mode === "single" && !!state.context.score)
         }
         reason={state.context.reason}
@@ -173,11 +269,12 @@ export default function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      <Header />
       <Box
         sx={{
           display: "flex",
           flexDirection: "column",
-          minHeight: "100vh",
+          flexGrow: 1, // Changed from minHeight to flexGrow
           width: "100vw",
           overflow: "hidden",
         }}

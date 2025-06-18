@@ -6,7 +6,9 @@ import { AppDataSource } from "./config";
 import { Difficulty, GameManager } from "./services/game-manager";
 import * as dotenv from "dotenv";
 import playerRoutes from "./routes/player";
+import userRoutes from "./routes/user";
 import { logger } from "./utils/logger";
+import { clerkClient } from "@clerk/clerk-sdk-node";
 
 dotenv.config();
 
@@ -39,6 +41,7 @@ app.use((req, res, next) => {
 });
 
 app.use("/api/players", playerRoutes);
+app.use("/api/user", userRoutes);
 
 // Error handling middleware
 app.use(
@@ -55,21 +58,40 @@ app.use(
   }
 );
 
-// --- SOCKET.IO LOGGING ---
+// --- SOCKET.IO AUTHENTICATION & LOGGING ---
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) {
+    return next(new Error("Authentication error: No token provided."));
+  }
+  try {
+    const claims = await clerkClient.verifyToken(token);
+    (socket as any).userId = claims.sub;
+    next();
+  } catch (err) {
+    logger.error("[Socket.io] Authentication error:", err);
+    return next(new Error("Authentication error: Invalid token."));
+  }
+});
+
 AppDataSource.initialize()
   .then(() => {
     logger.info("Database connected");
     const gameManager = new GameManager(io);
     io.on("connection", (socket) => {
-      logger.info(`[Socket.io] Client connected: ${socket.id}`);
+      logger.info(
+        `[Socket.io] Client connected: ${socket.id} (userId: ${
+          (socket as any).userId
+        })`
+      );
       // Log all incoming events
       const originalOn = socket.on.bind(socket);
       socket.on = (event: string, listener: (...args: any[]) => void) => {
         originalOn(event, (...args: any[]) => {
           logger.info(
-            `[Socket.io] Received event '${event}' from ${
-              socket.id
-            } payload=${JSON.stringify(args)}`
+            `[Socket.io] Received event '${event}' from ${socket.id} (userId: ${
+              (socket as any).userId
+            }) payload=${JSON.stringify(args)}`
           );
           listener(...args);
         });
@@ -77,10 +99,18 @@ AppDataSource.initialize()
       };
       // Register game events
       socket.on("joinQueue", (data: { difficulty: Difficulty }) =>
-        gameManager.joinQueue(socket.id, data.difficulty)
+        gameManager.joinQueue(
+          socket.id,
+          (socket as any).userId,
+          data.difficulty
+        )
       );
       socket.on("startSinglePlayerGame", (data: { difficulty: Difficulty }) => {
-        gameManager.startSinglePlayerGame(socket.id, data.difficulty);
+        gameManager.startSinglePlayerGame(
+          socket.id,
+          (socket as any).userId,
+          data.difficulty
+        );
       });
       socket.on("leaveQueue", () => gameManager.leaveQueue(socket.id));
       socket.on("playerReady", (data) =>
@@ -97,7 +127,9 @@ AppDataSource.initialize()
       });
       socket.on("disconnect", (reason) => {
         logger.info(
-          `[Socket.io] Client disconnected: ${socket.id} reason=${reason}`
+          `[Socket.io] Client disconnected: ${socket.id} (userId: ${
+            (socket as any).userId
+          }) reason=${reason}`
         );
         gameManager.handleDisconnect(socket.id);
       });

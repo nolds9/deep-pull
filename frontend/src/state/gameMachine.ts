@@ -1,4 +1,4 @@
-import { createMachine, assign, fromCallback, raise, stop } from "xstate";
+import { createMachine, assign, fromCallback, stop } from "xstate";
 import type { Player } from "../types";
 
 export type GameMode = "single" | "multiplayer";
@@ -27,6 +27,7 @@ export interface GameContext {
 export type GameEvent =
   | { type: "PLAY" }
   | { type: "HOW_TO_PLAY" }
+  | { type: "VIEW_PROFILE" }
   | { type: "BACK" }
   | { type: "SET_MODE"; mode: GameMode }
   | { type: "SET_DIFFICULTY"; difficulty: Difficulty }
@@ -103,6 +104,12 @@ export const gameMachine = createMachine(
         on: {
           PLAY: "modeSelection",
           HOW_TO_PLAY: "howto",
+          VIEW_PROFILE: "profile",
+        },
+      },
+      profile: {
+        on: {
+          BACK: "home",
         },
       },
       modeSelection: {
