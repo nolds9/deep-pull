@@ -1,12 +1,18 @@
 import React from "react";
 import { Box, Button, Typography, Stack } from "@mui/material";
+import { SignInButton } from "@clerk/clerk-react";
 
 interface HomeScreenProps {
   onPlay: () => void;
   onHowToPlay: () => void;
+  isSignedIn: boolean | undefined;
 }
 
-const HomeScreen: React.FC<HomeScreenProps> = ({ onPlay, onHowToPlay }) => {
+const HomeScreen: React.FC<HomeScreenProps> = ({
+  onPlay,
+  onHowToPlay,
+  isSignedIn,
+}) => {
   return (
     <Box
       sx={{
@@ -16,21 +22,28 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onPlay, onHowToPlay }) => {
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        background: "linear-gradient(135deg, #0f2027 0%, #2c5364 100%)",
       }}
     >
       <Typography variant="h2" color="white" gutterBottom fontWeight={700}>
         Player Rush
       </Typography>
       <Stack spacing={2} direction="column" alignItems="center">
-        <Button
-          variant="contained"
-          color="primary"
-          size="large"
-          onClick={onPlay}
-        >
-          Play
-        </Button>
+        {isSignedIn ? (
+          <Button
+            variant="contained"
+            color="primary"
+            size="large"
+            onClick={onPlay}
+          >
+            Play
+          </Button>
+        ) : (
+          <SignInButton mode="modal">
+            <Button variant="contained" color="primary" size="large">
+              Play
+            </Button>
+          </SignInButton>
+        )}
         <Button
           variant="outlined"
           color="secondary"

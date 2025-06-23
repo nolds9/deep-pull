@@ -1,7 +1,7 @@
 {
-    "name": "nfl-gaming-backend",
+    "name": "mythical-pull-backend",
     "version": "0.1.0",
-    "description": "Backend server for NFL Player Connection Game (MVP)",
+    "description": "Backend server for Mythical Pull",
     "main": "dist/app.js",
     "scripts": {
         "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
@@ -9,8 +9,10 @@
         "start": "node dist/app.js"
     },
     "dependencies": {
+        "@clerk/clerk-sdk-node": "^4.13.23",
+        "@clerk/express": "^1.7.0",
         "dotenv": "^16.5.0",
-        "express": "^5.1.0",
+        "express": "^4.19.2",
         "pg": "^8.16.0",
         "reflect-metadata": "^0.2.2",
         "socket.io": "^4.8.1",
@@ -19,7 +21,7 @@
         "winston": "^3.17.0"
     },
     "devDependencies": {
-        "@types/express": "^5.0.3",
+        "@types/express": "^4.17.21",
         "@types/node": "^24.0.1",
         "@types/socket.io": "^3.0.2",
         "ts-node": "^10.9.2",
