@@ -12,6 +12,10 @@ This document tracks the live implementation status of the platform rearchitectu
 
 ## ✅ Recently Completed
 
+- [x] **Extend ETL for Team Data**:
+  - Extended the Python ETL pipeline (`etl/mvp_pipeline.py`) to populate the `teams` and `team_season_leaders` tables.
+  - The pipeline now fetches team metadata and calculates seasonal leaders for passing, rushing, and receiving.
+  - Updated the `run_etl.py` script to report on these new data points.
 - [x] **Standardize Schema Management**:
   - Consolidated all table definitions (`players`, `teams`, `users`, `user_stats`, `game_sessions`, `player_connections`, `player_seasonal_stats`, `team_season_leaders`) into `etl/manage_schema.py` as the single source of truth.
   - Added a `--recreate` flag to the script for robust schema resets.

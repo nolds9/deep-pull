@@ -18,6 +18,19 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+TEAM_ABBR_NORMALIZATION_MAP = {
+    'STL': 'LAR',
+    'LA': 'LAR',
+    'SD': 'LAC',
+    'OAK': 'LV',
+}
+
+TEAM_NAME_NORMALIZATION_MAP = {
+    'St. Louis Rams': 'Los Angeles Rams',
+    'San Diego Chargers': 'Los Angeles Chargers',
+    'Oakland Raiders': 'Las Vegas Raiders'
+}
+
 class MVPETLPipeline:
     """
     Minimal viable ETL for NFL racing game
@@ -48,10 +61,12 @@ class MVPETLPipeline:
             transaction = conn.begin()
             try:
                 # Delete from tables that reference players first
+                conn.execute(text("DELETE FROM team_season_leaders"))
                 conn.execute(text("DELETE FROM player_seasonal_stats"))
                 conn.execute(text("DELETE FROM player_connections"))
-                # Now delete from players, which will cascade to other app tables
+                # Now delete from players and teams
                 conn.execute(text("DELETE FROM players"))
+                conn.execute(text("DELETE FROM teams"))
                 transaction.commit()
                 logger.info("Successfully cleared ETL-managed tables.")
             except Exception as e:
@@ -112,6 +127,11 @@ class MVPETLPipeline:
         logger.info(f"Position breakdown: {position_counts.to_dict()}")
         self._log_skill_position_stats(rosters_for_connections)
         
+        # --- NORMALIZE TEAM ABBRS IN ROSTERS ---
+        if 'team' in rosters_for_connections.columns:
+            rosters_for_connections['team'] = rosters_for_connections['team'].apply(self._normalize_team_abbr)
+        # --- END NORMALIZATION ---
+
         del rosters_weekly
         gc.collect()
         
@@ -345,7 +365,8 @@ class MVPETLPipeline:
                 if_exists='append',
                 index=False,
                 method='multi',
-                chunksize=500
+                chunksize=500,
+                dtype={'teams': JSON}
             )
             logger.info(f"Loaded {len(players_to_load)} players")
         except Exception as e:
@@ -397,6 +418,7 @@ class MVPETLPipeline:
         logger.info("Processing and loading connections with global limits...")
         
         self.connection_count = 0  # Reset counter
+        processed_teammate_pairs = set()
         
         # 1. Teammate connections (highest priority)
         logger.info("Building teammate connections...")
@@ -411,7 +433,7 @@ class MVPETLPipeline:
                 break
                 
             rosters_for_year = pd.read_parquet(self.roster_temp_file, filters=[('season', '==', year)])
-            connections = self._build_teammate_connections(rosters_for_year)
+            connections = self._build_teammate_connections(rosters_for_year, processed_teammate_pairs)
             
             if connections:
                 connections_df = pd.DataFrame(connections)
@@ -455,7 +477,7 @@ class MVPETLPipeline:
         logger.info(f"Final connection count: {self.connection_count}")
         return self.connection_count
     
-    def _build_teammate_connections(self, rosters_df: pd.DataFrame) -> list:
+    def _build_teammate_connections(self, rosters_df: pd.DataFrame, processed_pairs: set) -> list:
         """Build skill position teammate connections with rich metadata"""
         connections = []
         logger.info(f"Building skill position teammate connections...")
@@ -480,6 +502,10 @@ class MVPETLPipeline:
                 logger.info(f"Processed {processed_teams} team-seasons, {len(connections)} connections so far")
             for i, player1 in enumerate(players):
                 for player2 in players[i+1:]:
+                    pair = tuple(sorted((player1, player2)))
+                    if pair in processed_pairs:
+                        continue
+
                     if len(connections) >= self.MAX_TOTAL_CONNECTIONS:
                         logger.warning(f"🚨 Hit connection limit ({self.MAX_TOTAL_CONNECTIONS})")
                         return connections
@@ -511,6 +537,7 @@ class MVPETLPipeline:
                         'connection_type': 'teammate',
                         'metadata': metadata
                     })
+                    processed_pairs.add(pair)
         logger.info(f"Created {len(connections)} skill position teammate connections")
         logger.info(f"Star player connections: {star_connection_count}")
         return connections
@@ -689,21 +716,135 @@ class MVPETLPipeline:
         for combo, count in position_combos.items():
             logger.info(f"     {combo}: {count} team-seasons")
 
+    def _normalize_team_abbr(self, team_abbr: str) -> str:
+        """Normalizes a team abbreviation to its canonical form."""
+        return TEAM_ABBR_NORMALIZATION_MAP.get(team_abbr, team_abbr)
+
+    def _extract_and_load_teams(self):
+        """Extracts team descriptions and loads them into the teams table."""
+        logger.info("Extracting and loading teams...")
+        try:
+            team_desc_df = nfl.import_team_desc()
+            
+            # --- NORMALIZATION ---
+            team_desc_df['team_abbr'] = team_desc_df['team_abbr'].apply(self._normalize_team_abbr)
+            team_desc_df['team_name'] = team_desc_df['team_name'].replace(TEAM_NAME_NORMALIZATION_MAP)
+            team_desc_df.drop_duplicates(subset=['team_abbr'], keep='last', inplace=True)
+            logger.info(f"Normalized teams. Count after deduplication: {len(team_desc_df)}")
+            # --- END NORMALIZATION ---
+
+            teams_to_load = team_desc_df[[
+                'team_abbr', 'team_name', 'team_division', 'team_conf'
+            ]].copy()
+            
+            teams_to_load.rename(columns={
+                'team_abbr': 'id',
+                'team_name': 'name',
+                'team_division': 'division',
+                'team_conf': 'conference'
+            }, inplace=True)
+            
+            teams_to_load['abbreviation'] = teams_to_load['id']
+
+            teams_to_load = teams_to_load[['id', 'name', 'abbreviation', 'division', 'conference']]
+
+            if hasattr(self, '_dry_run') and self._dry_run:
+                 logger.info(f"DRY RUN - Would load {len(teams_to_load)} teams.")
+            else:
+                teams_to_load.to_sql(
+                    'teams',
+                    self.engine,
+                    if_exists='append',
+                    index=False,
+                    method='multi'
+                )
+                logger.info(f"Loaded {len(teams_to_load)} teams.")
+            
+            return len(teams_to_load)
+        except Exception as e:
+            logger.error(f"Failed to load teams: {e}")
+            raise
+
+    def _calculate_and_load_team_season_leaders(self, all_stats_df: pd.DataFrame, gsis_to_canonical_map: dict):
+        """Calculates and loads team season leaders for passing, rushing, and receiving."""
+        logger.info("Calculating and loading team season leaders...")
+        
+        try:
+            stats_df = all_stats_df.copy()
+
+            if 'team' not in stats_df.columns:
+                logger.error("Could not find a team column in seasonal stats. Skipping leader calculation.")
+                return 0
+
+            stats_df['player_id'] = stats_df['gsis_id'].map(gsis_to_canonical_map)
+            
+            logger.info(f"[DEBUG] Team leader stats shape before dropna: {stats_df.shape}")
+            stats_df.dropna(subset=['player_id', 'team'], inplace=True)
+            logger.info(f"[DEBUG] Team leader stats shape after dropna: {stats_df.shape}")
+
+            if stats_df.empty:
+                logger.warning("No stats data available to calculate team leaders.")
+                return 0
+
+            stat_cols = ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']
+            for col in stat_cols:
+                if col not in stats_df.columns:
+                    stats_df[col] = 0
+                else:
+                    stats_df[col] = pd.to_numeric(stats_df[col], errors='coerce').fillna(0)
+
+            passing_leaders = stats_df.loc[stats_df.groupby(['season', 'team'])['passing_yards'].idxmax()]
+            passing_leaders = passing_leaders[['season', 'team', 'player_id']].rename(columns={'player_id': 'passing_leader_id'})
+
+            rushing_leaders = stats_df.loc[stats_df.groupby(['season', 'team'])['rushing_yards'].idxmax()]
+            rushing_leaders = rushing_leaders[['season', 'team', 'player_id']].rename(columns={'player_id': 'rushing_leader_id'})
+
+            receiving_leaders = stats_df.sort_values('receiving_yards', ascending=False) \
+                .groupby(['season', 'team']) \
+                .apply(lambda x: x.head(3)[['player_id', 'player_name', 'receiving_yards', 'receptions']].to_dict('records')) \
+                .reset_index(name='receiving_leaders')
+
+            team_leaders = pd.merge(passing_leaders, rushing_leaders, on=['season', 'team'], how='outer')
+            team_leaders = pd.merge(team_leaders, receiving_leaders, on=['season', 'team'], how='outer')
+            
+            team_leaders.rename(columns={'team': 'team_id'}, inplace=True)
+
+            team_leaders['passing_leader_id'] = team_leaders['passing_leader_id'].where(pd.notna(team_leaders['passing_leader_id']), None)
+            team_leaders['rushing_leader_id'] = team_leaders['rushing_leader_id'].where(pd.notna(team_leaders['rushing_leader_id']), None)
+            
+            if hasattr(self, '_dry_run') and self._dry_run:
+                logger.info(f"DRY RUN - Would load {len(team_leaders)} team season leader records.")
+            else:
+                team_leaders.to_sql(
+                    'team_season_leaders',
+                    self.engine,
+                    if_exists='append',
+                    index=False,
+                    method='multi',
+                    dtype={'receiving_leaders': JSON}
+                )
+                logger.info(f"Loaded {len(team_leaders)} team season leader records.")
+
+            return len(team_leaders)
+
+        except Exception as e:
+            logger.error(f"Failed to calculate and load team season leaders: {e}", exc_info=True)
+            raise
+
     def extract_and_load_seasonal_stats(self, players_df: pd.DataFrame, all_stats_df: pd.DataFrame):
         """Extracts and loads seasonal player stats using a canonical ID mapping."""
         logger.info("Processing and loading seasonal player stats...")
         
-        # Build a mapping from gsis_id to our canonical ID from the final player list
         if 'gsis_id' not in players_df.columns or 'id' not in players_df.columns:
             logger.warning("Player data is missing 'id' or 'gsis_id' columns, skipping stats.")
-            return 0
+            return 0, {}
             
         id_map_df = players_df.dropna(subset=['gsis_id'])
         gsis_to_canonical_map = pd.Series(id_map_df.id.values, index=id_map_df.gsis_id).to_dict()
 
         if not gsis_to_canonical_map:
             logger.warning("No players with gsis_id to map, skipping seasonal stats.")
-            return 0
+            return 0, {}
 
         # The stats are already loaded, just need to process them
         stats_df = all_stats_df.copy()
@@ -715,7 +856,7 @@ class MVPETLPipeline:
 
         if stats_df.empty:
             logger.warning("No matching seasonal stats found for players in the database.")
-            return 0
+            return 0, {}
 
         # Select and clean relevant columns
         stat_cols = [
@@ -743,7 +884,7 @@ class MVPETLPipeline:
             chunksize=500
         )
         logger.info("Seasonal stats loaded successfully.")
-        return len(stats_to_load)
+        return len(stats_to_load), gsis_to_canonical_map
 
     def run_mvp_etl(self):
         """Main ETL process for MVP - with safe estimation and incremental loading"""
@@ -769,6 +910,26 @@ class MVPETLPipeline:
             if 'player_id' in all_stats_df.columns:
                 all_stats_df.rename(columns={'player_id': 'gsis_id'}, inplace=True)
             
+            # Enrich stats with team data for leader calculations
+            try:
+                logger.info("Enriching seasonal stats with team information...")
+                # Weekly rosters are more reliable for getting team info for each player/season
+                all_rosters = pd.concat([nfl.import_weekly_rosters([year]) for year in self.years], ignore_index=True)
+                
+                # --- NORMALIZE TEAM ABBRS IN WEEKLY ROSTERS ---
+                if 'team' in all_rosters.columns:
+                    all_rosters['team'] = all_rosters['team'].apply(self._normalize_team_abbr)
+                # --- END NORMALIZATION ---
+
+                # A player can be on multiple teams in a season. For seasonal stats,
+                # we'll associate them with their last team of the season.
+                team_map = all_rosters[['gsis_id', 'season', 'week', 'team']].dropna(subset=['gsis_id'])
+                team_map = team_map.sort_values('week').drop_duplicates(subset=['gsis_id', 'season'], keep='last')
+                all_stats_df = pd.merge(all_stats_df, team_map[['gsis_id', 'season', 'team']], on=['gsis_id', 'season'], how='left')
+                logger.info("Successfully enriched stats with team data.")
+            except Exception as e:
+                logger.warning(f"Could not enrich stats with team data, team leaders may be skipped. Error: {e}")
+
             # Identify players who have actually had some impact
             significant_players_df = all_stats_df[all_stats_df['fantasy_points_ppr'] > 1]
             significant_gsis_ids = set(significant_players_df['gsis_id'].dropna().unique())
@@ -787,14 +948,19 @@ class MVPETLPipeline:
             # Step 2: Extract and clean player data, filtered by significance
             players_df = self.extract_players(significant_esb_ids)
             players_count = len(players_df)
+            teams_count = 0
+            seasonal_stats_count = 0
+            team_leaders_count = 0
             
             if hasattr(self, '_dry_run') and self._dry_run:
                 logger.info("DRY RUN - Skipping database load")
+                teams_count = self._extract_and_load_teams()
                 logger.info("DRY RUN - Using safe estimation instead of building all connections...")
                 estimates = self.estimate_connection_count()
                 connections_count = estimates.get('capped_total', 0)
                 logger.info(f"DRY RUN Results:")
                 logger.info(f"  Players: {players_count}")
+                logger.info(f"  Teams: {teams_count}")
                 logger.info(f"  Estimated connections: {connections_count}")
                 logger.info(f"  Safety status: {'✅ SAFE' if estimates.get('safe', False) else '❌ UNSAFE'}")
             else:
@@ -803,14 +969,22 @@ class MVPETLPipeline:
                 
                 # Step 2a: Clear out old data from pipeline-managed tables
                 self._clear_data_pipeline_tables()
+
+                # Step 2b: Load teams
+                teams_count = self._extract_and_load_teams()
+                logger.info(f"✅ Loaded {teams_count} teams")
                 
                 # Step 3: Load players table
                 self._load_players(players_df)
                 logger.info(f"✅ Loaded {players_count} players")
                 
                 # Step 4: Load seasonal stats for these players
-                seasonal_stats_count = self.extract_and_load_seasonal_stats(players_df, all_stats_df)
+                seasonal_stats_count, gsis_map = self.extract_and_load_seasonal_stats(players_df, all_stats_df)
                 logger.info(f"✅ Loaded {seasonal_stats_count} seasonal stat records")
+
+                # Step 4b: Calculate and load team seasonal leaders
+                team_leaders_count = self._calculate_and_load_team_season_leaders(all_stats_df, gsis_map)
+                logger.info(f"✅ Loaded {team_leaders_count} team season leader records")
 
                 del players_df
                 gc.collect()
@@ -825,8 +999,10 @@ class MVPETLPipeline:
             logger.info(f"ETL completed successfully in {duration}")
             return {
                 'players_count': players_count,
+                'teams_count': teams_count,
                 'connections_count': connections_count,
                 'seasonal_stats_count': seasonal_stats_count,
+                'team_leaders_count': team_leaders_count,
                 'duration_seconds': duration.total_seconds(),
                 'status': 'dry_run' if hasattr(self, '_dry_run') and self._dry_run else 'completed'
             }
@@ -849,9 +1025,19 @@ class MVPETLPipeline:
             connection_count = conn.execute(text("SELECT COUNT(*) FROM player_connections")).scalar()
             
             try:
+                teams_count = conn.execute(text("SELECT COUNT(*) FROM teams")).scalar()
+            except Exception:
+                teams_count = 0
+
+            try:
                 seasonal_stats_count = conn.execute(text("SELECT COUNT(*) FROM player_seasonal_stats")).scalar()
             except Exception:
                 seasonal_stats_count = 0 # Table might not exist yet on first run
+            
+            try:
+                team_leaders_count = conn.execute(text("SELECT COUNT(*) FROM team_season_leaders")).scalar()
+            except Exception:
+                team_leaders_count = 0
             
             orphaned = conn.execute(text("""
                 SELECT COUNT(*) FROM player_connections pc
@@ -859,7 +1045,7 @@ class MVPETLPipeline:
                    OR NOT EXISTS (SELECT 1 FROM players p WHERE p.id = pc.player2_id)
             """)).scalar()
             
-            logger.info(f"Data quality check - Players: {player_count}, Connections: {connection_count}, Seasonal Stats: {seasonal_stats_count}, Orphaned: {orphaned}")
+            logger.info(f"Data quality check - Players: {player_count}, Teams: {teams_count}, Connections: {connection_count}, Seasonal Stats: {seasonal_stats_count}, Team Leaders: {team_leaders_count}, Orphaned: {orphaned}")
             
             if orphaned > 0:
                 logger.warning(f"Found {orphaned} orphaned connections!")

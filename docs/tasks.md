@@ -44,7 +44,7 @@ The goal is to evolve the backend from a single-game server to a multi-game plat
   - [ ] Create a new REST API endpoint (e.g., `/api/leaderboard`).
   - [ ] The endpoint should accept query parameters for `gameType` and `difficulty`.
   - [ ] Implement logic to query persisted `game_sessions` and return ranked results.
-- [ ] **Data for Future Games**:
+- [x] **Data for Future Games**:
   - [x] Add `teams` and `team_season_leaders` tables to `etl/manage_schema.py`.
   - [x] Create `Team` and `TeamSeasonLeaders` TypeORM entities.
-  - [ ] Extend the Python ETL pipeline (`etl/mvp_pipeline.py`) to calculate and populate the `teams` and `team_season_leaders` tables.
+  - [x] Extend the Python ETL pipeline (`etl/mvp_pipeline.py`) to calculate and populate the `teams` and `team_season_leaders` tables.
