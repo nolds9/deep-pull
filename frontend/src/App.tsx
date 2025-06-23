@@ -61,7 +61,7 @@ const Header = ({ isHome }: { isHome: boolean }) => {
           {!isHome && "Player Rush"}
         </Typography>
         <SignedIn>
-          <UserButton afterSignOutUrl="/" />
+          <UserButton />
         </SignedIn>
         <SignedOut>
           <SignInButton mode="modal">
@@ -83,13 +83,21 @@ export default function App() {
     const manageSocketConnection = async () => {
       if (isSignedIn) {
         console.log("User is signed in, configuring socket...");
+
+        // Provide a function to socket.auth. This is called on every connection
+        // attempt, ensuring a fresh, valid token is used, which fixes the
+        // "JWT expired" error on reconnects.
+        socket.auth = async (cb) => {
+          const token = await getToken();
+          cb({ token });
+        };
+
+        // Sync user with backend
         const token = await getToken();
         if (token) {
-          // Sync user with backend
           fetch(`${import.meta.env.VITE_API_BASE_URL}/api/user/me`, {
             headers: { Authorization: `Bearer ${token}` },
           });
-          socket.auth = { token };
         }
 
         if (socket.disconnected) {
@@ -286,7 +294,7 @@ export default function App() {
         sx={{
           display: "flex",
           flexDirection: "column",
-          flexGrow: 1, // Changed from minHeight to flexGrow
+          minHeight: "100vh",
           width: "100vw",
           overflow: "hidden",
           background: getScreenBackground(state),

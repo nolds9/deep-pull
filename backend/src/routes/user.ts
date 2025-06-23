@@ -12,11 +12,13 @@ const syncUserWithClerk = async (userId: string): Promise<User> => {
   const clerkUser = await clerkClient.users.getUser(userId);
 
   // Prepare user data from Clerk
+  const name =
+    clerkUser.firstName && clerkUser.lastName
+      ? `${clerkUser.firstName} ${clerkUser.lastName}`
+      : clerkUser.firstName || clerkUser.username || `User_${userId.slice(5)}`;
+
   const userData = {
-    name:
-      `${clerkUser.firstName} ${clerkUser.lastName}`.trim() ||
-      clerkUser.username ||
-      `user_${userId.slice(5)}`,
+    name: name,
     username: clerkUser.username,
     imageUrl: clerkUser.imageUrl,
   };
