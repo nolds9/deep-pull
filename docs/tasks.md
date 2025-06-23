@@ -35,14 +35,16 @@ The goal is to evolve the backend from a single-game server to a multi-game plat
   - [ ] Update the `joinQueue` socket event to accept a `gameType` parameter.
   - [ ] Implement a factory or strategy pattern for creating different game instances.
 - [ ] **Game Session Persistence**:
-  - [ ] Create a `GameSession` TypeORM entity based on `nfl_gaming_architecture.md`.
+  - [x] Create a `GameSession` table schema in `etl/manage_schema.py`.
+  - [x] Create the `GameSession` TypeORM entity.
   - [ ] Update `GameManager` to save completed game sessions to the PostgreSQL database.
-- [ ] **Standardize Schema Management**:
-  - [ ] Use `etl/manage_schema.py` for creating and updating all non-data-pipeline tables (e.g., `users`, `game_sessions`, `team_season_leaders`).
+- [x] **Standardize Schema Management**:
+  - [x] Use `etl/manage_schema.py` for creating and updating all application and data-pipeline tables.
 - [ ] **Leaderboard API**:
   - [ ] Create a new REST API endpoint (e.g., `/api/leaderboard`).
   - [ ] The endpoint should accept query parameters for `gameType` and `difficulty`.
   - [ ] Implement logic to query persisted `game_sessions` and return ranked results.
 - [ ] **Data for Future Games**:
-  - [ ] Add the `team_season_leaders` table to the database schema (can use TypeORM entity or `etl/manage_schema.py`).
-  - [ ] Extend the Python ETL pipeline (`etl/mvp_pipeline.py`) to calculate and populate this new table.
+  - [x] Add `teams` and `team_season_leaders` tables to `etl/manage_schema.py`.
+  - [x] Create `Team` and `TeamSeasonLeaders` TypeORM entities.
+  - [ ] Extend the Python ETL pipeline (`etl/mvp_pipeline.py`) to calculate and populate the `teams` and `team_season_leaders` tables.

@@ -17,7 +17,7 @@ export class Player {
   @Column({ type: "int", nullable: true })
   draft_year!: number;
 
-  @Column("simple-array", { nullable: true })
+  @Column({ type: "json", nullable: true })
   teams!: string[];
 
   @Column({ type: "int", nullable: true })

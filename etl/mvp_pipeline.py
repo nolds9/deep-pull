@@ -41,48 +41,23 @@ class MVPETLPipeline:
         # Connection tracking
         self.connection_count = 0
         
-        # Define table schema for automatic creation
-        self.metadata = MetaData()
-        self.players_table = Table('players', self.metadata,
-            Column('id', String, primary_key=True),
-            Column('name', String, nullable=False),
-            Column('position', String),
-            Column('college', String),
-            Column('draft_year', Integer),
-            Column('teams', JSON),
-            Column('first_season', Integer),
-            Column('last_season', Integer)
-        )
-        self.connections_table = Table('player_connections', self.metadata,
-            Column('player1_id', String, primary_key=True),
-            Column('player2_id', String, primary_key=True),
-            Column('connection_type', String, primary_key=True),
-            Column('metadata', JSON)
-        )
-        self.seasonal_stats_table = Table('player_seasonal_stats', self.metadata,
-            Column('id', Integer, primary_key=True, autoincrement=True),
-            Column('player_id', String, index=True),
-            Column('season', Integer),
-            Column('fantasy_points', Float),
-            Column('fantasy_points_ppr', Float),
-            Column('passing_yards', Float),
-            Column('passing_tds', Float),
-            Column('interceptions', Float),
-            Column('rushing_yards', Float),
-            Column('rushing_tds', Float),
-            Column('carries', Float),
-            Column('receiving_yards', Float),
-            Column('receiving_tds', Float),
-            Column('receptions', Float),
-            Column('targets', Float),
-            UniqueConstraint('player_id', 'season', name='uq_player_season_stats')
-        )
-        
-    def _create_tables_if_not_exist(self):
-        """Creates the database tables if they don't already exist."""
-        logger.info("Ensuring database tables exist...")
-        self.metadata.create_all(self.engine)
-        logger.info("Tables checked/created successfully.")
+    def _clear_data_pipeline_tables(self):
+        """Clears data from tables managed by the ETL pipeline, respecting foreign keys."""
+        logger.info("Clearing data from ETL-managed tables (players, connections, stats)...")
+        with self.engine.connect() as conn:
+            transaction = conn.begin()
+            try:
+                # Delete from tables that reference players first
+                conn.execute(text("DELETE FROM player_seasonal_stats"))
+                conn.execute(text("DELETE FROM player_connections"))
+                # Now delete from players, which will cascade to other app tables
+                conn.execute(text("DELETE FROM players"))
+                transaction.commit()
+                logger.info("Successfully cleared ETL-managed tables.")
+            except Exception as e:
+                logger.error(f"Error clearing tables: {e}")
+                transaction.rollback()
+                raise
         
     def extract_players(self, significant_esb_ids: set, rosters: pd.DataFrame | None = None) -> pd.DataFrame:
         """
@@ -357,81 +332,44 @@ class MVPETLPipeline:
         return player_summary
     
     def _load_players(self, players_df: pd.DataFrame):
-        """Replaces the players table with the new data, using batching."""
+        """Appends player data to the players table in batches."""
         logger.info("Loading players to database...")
 
         # Drop gsis_id before loading, it's not part of the final players table schema
         players_to_load = players_df.drop(columns=['gsis_id'], errors='ignore')
 
-        batch_size = 500  # A very safe batch size for any environment
-        total_batches = (len(players_to_load) - 1) // batch_size + 1
-
         try:
-            # First batch replaces the table
-            logger.info(f"  -> Loading player batch 1/{total_batches}")
-            players_to_load.iloc[:batch_size].to_sql(
+            players_to_load.to_sql(
                 'players',
                 self.engine,
-                if_exists='replace',
+                if_exists='append',
                 index=False,
-                method='multi'
+                method='multi',
+                chunksize=500
             )
-            time.sleep(0.05) # Give the DB a break
-
-            # Subsequent batches append to the table
-            for i in range(1, total_batches):
-                logger.info(f"  -> Loading player batch {i + 1}/{total_batches}")
-                start = i * batch_size
-                end = start + batch_size
-                players_to_load.iloc[start:end].to_sql(
-                    'players',
-                    self.engine,
-                    if_exists='append',
-                    index=False,
-                    method='multi'
-                )
-                time.sleep(0.05) # Give the DB a break
-
             logger.info(f"Loaded {len(players_to_load)} players")
         except Exception as e:
             logger.error(f"Player database load failed: {e}")
             raise
 
-    def _load_connections_batch(self, connections_df: pd.DataFrame, is_first_batch: bool = False):
+    def _load_connections_batch(self, connections_df: pd.DataFrame):
         """Helper to load a DataFrame of connections in batches."""
         if connections_df.empty:
             return
-
-        # On the first batch, we replace the table. On others, we append.
-        if_exists_strategy = 'replace' if is_first_batch else 'append'
         
-        batch_size = 500 # Reduced to a very safe size
-        total_batches = (len(connections_df) - 1) // batch_size + 1
-        
-        # Each batch will now run in its own transaction, initiated by to_sql
-        for i, start in enumerate(range(0, len(connections_df), batch_size)):
-            end = start + batch_size
-            batch = connections_df.iloc[start:end]
-            try:
-                batch.to_sql(
-                    'player_connections',
-                    self.engine, # Use the engine directly to allow auto-transactions
-                    if_exists=if_exists_strategy,
-                    index=False,
-                    method='multi',
-                    dtype={'metadata': JSON}
-                )
-                # After the first chunk of the first batch, all subsequent writes must be appends.
-                if_exists_strategy = 'append'
-
-                if total_batches > 1:
-                    logger.info(f"  -> Loaded connection batch {i + 1}/{total_batches}")
-                
-                time.sleep(0.05) # Give the DB a small break after each batch
-
-            except Exception as e:
-                logger.error(f"Failed to load a batch of {len(connections_df)} connections.")
-                raise e
+        try:
+            connections_df.to_sql(
+                'player_connections',
+                self.engine,
+                if_exists='append',
+                index=False,
+                method='multi',
+                chunksize=500, # Use chunksize for batching
+                dtype={'metadata': JSON}
+            )
+        except Exception as e:
+            logger.error(f"Failed to load a batch of {len(connections_df)} connections.")
+            raise e
 
     def _build_and_load_teammate_connections(self) -> int:
         """Processes and loads teammate connections from temp file year-by-year."""
@@ -441,7 +379,6 @@ class MVPETLPipeline:
         years = sorted(rosters_cols['season'].unique())
         del rosters_cols
         
-        is_first_data_batch = True
         logger.info("Building and loading teammate connections year-by-year...")
         for year in years:
             rosters_for_year = pd.read_parquet(self.roster_temp_file, filters=[('season', '==', year)])
@@ -450,9 +387,8 @@ class MVPETLPipeline:
             if connections:
                 connections_df = pd.DataFrame(connections)
                 logger.info(f"Loading {len(connections_df)} teammate connections for {year}...")
-                self._load_connections_batch(connections_df, is_first_batch=is_first_data_batch)
+                self._load_connections_batch(connections_df)
                 total_teammate_conns += len(connections_df)
-                is_first_data_batch = False # Only the very first batch can replace
                 
         return total_teammate_conns
 
@@ -480,9 +416,8 @@ class MVPETLPipeline:
             if connections:
                 connections_df = pd.DataFrame(connections)
                 logger.info(f"Loading {len(connections_df)} teammate connections for {year}...")
-                self._load_connections_batch(connections_df, is_first_batch=is_first_batch)
+                self._load_connections_batch(connections_df)
                 self.connection_count += len(connections_df)
-                is_first_batch = False
                 
                 logger.info(f"Total connections so far: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
         
@@ -501,7 +436,7 @@ class MVPETLPipeline:
                 college_connections = self._build_college_connections(other_rosters_df)
                 if college_connections:
                     connections_df = pd.DataFrame(college_connections)
-                    self._load_connections_batch(connections_df, is_first_batch=False)
+                    self._load_connections_batch(connections_df)
                     self.connection_count += len(connections_df)
                     logger.info(f"Total after college: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
             
@@ -510,7 +445,7 @@ class MVPETLPipeline:
                 draft_connections = self._build_draft_connections(other_rosters_df)
                 if draft_connections:
                     connections_df = pd.DataFrame(draft_connections)
-                    self._load_connections_batch(connections_df, is_first_batch=False)
+                    self._load_connections_batch(connections_df)
                     self.connection_count += len(connections_df)
                     logger.info(f"Total after draft: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
             
@@ -802,7 +737,7 @@ class MVPETLPipeline:
         stats_to_load.to_sql(
             'player_seasonal_stats',
             self.engine,
-            if_exists='replace',
+            if_exists='append',
             index=False,
             method='multi',
             chunksize=500
@@ -866,6 +801,9 @@ class MVPETLPipeline:
                 # Real run - load to database
                 logger.info("REAL RUN - Loading to database...")
                 
+                # Step 2a: Clear out old data from pipeline-managed tables
+                self._clear_data_pipeline_tables()
+                
                 # Step 3: Load players table
                 self._load_players(players_df)
                 logger.info(f"✅ Loaded {players_count} players")
@@ -881,15 +819,6 @@ class MVPETLPipeline:
                 connections_count = self._process_and_load_connections()
                 logger.info(f"✅ Loaded {connections_count} connections")
                 self._create_indexes()
-                # SAFEGUARD: Remove orphaned connections
-                with self.engine.connect() as conn:
-                    result = conn.execute(text("""
-                        DELETE FROM player_connections
-                        WHERE player1_id NOT IN (SELECT id FROM players)
-                           OR player2_id NOT IN (SELECT id FROM players)
-                    """))
-                    orphaned_deleted = result.rowcount if hasattr(result, 'rowcount') else 0
-                    logger.info(f"🧹 Deleted {orphaned_deleted} orphaned connections after load.")
                 self._validate_data_quality()
             
             duration = datetime.now() - start_time
