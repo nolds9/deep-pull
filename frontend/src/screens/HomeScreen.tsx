@@ -22,7 +22,6 @@ const HomeScreen: React.FC<HomeScreenProps> = ({
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        background: "linear-gradient(135deg, #0f2027 0%, #2c5364 100%)",
       }}
     >
       <Typography variant="h2" color="white" gutterBottom fontWeight={700}>

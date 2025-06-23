@@ -36,16 +36,29 @@ import ProfileScreen from "./screens/ProfileScreen";
 
 const theme = createTheme();
 
+const getScreenBackground = (
+  state: ReturnType<typeof useMachine<typeof gameMachine>>[0]
+) => {
+  if (state.matches("home") || state.matches("modeSelection")) {
+    return "linear-gradient(135deg, #0f2027 0%, #2c5364 100%)";
+  }
+  if (state.matches("game")) {
+    return "linear-gradient(135deg, #1e3c72 0%, #2a5298 100%)";
+  }
+  // Default for profile, howto, loading, end, lobby, countdown etc.
+  return "linear-gradient(135deg, #232526 0%, #414345 100%)";
+};
+
 // Extract event data types from the GameEvent union
 type GameStartData = Extract<GameEvent, { type: "GAME_START" }>["data"];
 type GameEndData = Extract<GameEvent, { type: "GAME_END" }>["data"];
 
-const Header = () => {
+const Header = ({ isHome }: { isHome: boolean }) => {
   return (
     <AppBar position="static" color="transparent" elevation={0}>
       <Toolbar>
         <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-          Player Rush
+          {!isHome && "Player Rush"}
         </Typography>
         <SignedIn>
           <UserButton afterSignOutUrl="/" />
@@ -73,7 +86,7 @@ export default function App() {
         const token = await getToken();
         if (token) {
           // Sync user with backend
-          fetch("http://localhost:3001/api/user/me", {
+          fetch(`${import.meta.env.VITE_API_BASE_URL}/api/user/me`, {
             headers: { Authorization: `Bearer ${token}` },
           });
           socket.auth = { token };
@@ -269,7 +282,6 @@ export default function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <Header />
       <Box
         sx={{
           display: "flex",
@@ -277,8 +289,10 @@ export default function App() {
           flexGrow: 1, // Changed from minHeight to flexGrow
           width: "100vw",
           overflow: "hidden",
+          background: getScreenBackground(state),
         }}
       >
+        <Header isHome={state.matches("home")} />
         <AnimatePresence mode="wait">
           <motion.div
             key={JSON.stringify(state.value)}

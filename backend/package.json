@@ -1,7 +1,7 @@
 {
-    "name": "nfl-gaming-backend",
+    "name": "mythical-pull-backend",
     "version": "0.1.0",
-    "description": "Backend server for NFL Player Connection Game (MVP)",
+    "description": "Backend server for Mythical Pull",
     "main": "dist/app.js",
     "scripts": {
         "dev": "ts-node-dev --respawn --transpile-only src/app.ts",

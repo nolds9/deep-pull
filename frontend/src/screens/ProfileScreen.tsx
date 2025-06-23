@@ -30,9 +30,12 @@ const ProfileScreen: React.FC<ProfileScreenProps> = ({ onBack }) => {
     const fetchStats = async () => {
       try {
         const token = await getToken();
-        const response = await fetch("http://localhost:3001/api/user/me", {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        const response = await fetch(
+          `${import.meta.env.VITE_API_BASE_URL}/api/user/me`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
         if (response.ok) {
           const data = await response.json();
           setStats(data.stats);

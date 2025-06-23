@@ -3,7 +3,8 @@ import pandas as pd
 import psycopg2
 from sqlalchemy import (
     create_engine, text, Table, Column, MetaData,
-    Integer, String, JSON, Float, UniqueConstraint
+    Integer, String, JSON, Float, UniqueConstraint,
+    DateTime, func, ForeignKey
 )
 from sqlalchemy.types import JSON
 import os

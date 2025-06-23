@@ -13,13 +13,13 @@ export class User {
   @PrimaryColumn()
   id!: string;
 
-  @Column()
+  @Column({ type: "varchar" })
   name!: string;
 
-  @Column({ unique: true })
-  username!: string;
+  @Column({ type: "varchar", unique: true, nullable: true })
+  username!: string | null;
 
-  @Column()
+  @Column({ type: "text" })
   imageUrl!: string;
 
   @OneToOne(() => UserStats, (stats: UserStats) => stats.user)

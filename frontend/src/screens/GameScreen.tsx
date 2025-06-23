@@ -99,7 +99,9 @@ const GameScreen: React.FC<GameScreenProps> = ({
     const fetchPlayers = async () => {
       try {
         const response = await fetch(
-          `http://localhost:3001/api/players?search=${inputValue}`
+          `${
+            import.meta.env.VITE_API_BASE_URL
+          }/api/players?search=${inputValue}`
         );
         const players = await response.json();
         if (active) {

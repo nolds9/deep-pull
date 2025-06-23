@@ -3,78 +3,83 @@ import { AppDataSource } from "../config";
 import { User } from "../entity/User";
 import { UserStats } from "../entity/UserStats";
 import { requireAuth } from "../middleware/auth";
-import { clerkClient } from "@clerk/clerk-sdk-node";
+import { getAuth, clerkClient } from "@clerk/express";
 
 const router = Router();
+
+const syncUserWithClerk = async (userId: string): Promise<User> => {
+  // Fetch user data from Clerk
+  const clerkUser = await clerkClient.users.getUser(userId);
+
+  // Prepare user data from Clerk
+  const userData = {
+    name:
+      `${clerkUser.firstName} ${clerkUser.lastName}`.trim() ||
+      clerkUser.username ||
+      `user_${userId.slice(5)}`,
+    username: clerkUser.username,
+    imageUrl: clerkUser.imageUrl,
+  };
+
+  // Use a transaction to ensure atomicity
+  return AppDataSource.transaction(async (transactionalEntityManager) => {
+    const userRepo = transactionalEntityManager.getRepository(User);
+    const statsRepo = transactionalEntityManager.getRepository(UserStats);
+
+    let user = await userRepo.findOneBy({ id: userId });
+
+    if (user) {
+      // Update existing user
+      userRepo.merge(user, userData);
+    } else {
+      // Create new user if they don't exist
+      user = userRepo.create({ id: userId, ...userData });
+    }
+    await userRepo.save(user);
+
+    // Check for stats and create if they don't exist
+    const stats = await statsRepo.findOneBy({ user_id: userId });
+    if (!stats) {
+      const newStats = statsRepo.create({ user_id: userId });
+      await statsRepo.save(newStats);
+    }
+
+    // Return the complete user profile with stats
+    return userRepo.findOneOrFail({
+      where: { id: userId },
+      relations: ["stats"],
+    });
+  });
+};
 
 // All routes here require authentication
 router.use(requireAuth);
 
-// GET /api/user/me - Get current user's profile and stats
+// GET /api/user/me - Get current user's profile and stats, syncing on first load.
 router.get("/me", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userRepo = AppDataSource.getRepository(User);
-    const user = await userRepo.findOne({
-      where: { id: req.auth.userId },
-      relations: ["stats"],
-    });
-
-    if (!user) {
-      // If user not in our DB, sync them
-      const clerkUser = await clerkClient.users.getUser(req.auth.userId);
-      const newUser = userRepo.create({
-        id: req.auth.userId,
-        name: `${clerkUser.firstName} ${clerkUser.lastName}`.trim(),
-        username: clerkUser.username!,
-        imageUrl: clerkUser.imageUrl,
-      });
-      const user = await userRepo.save(newUser);
-      const statsRepo = AppDataSource.getRepository(UserStats);
-      const newStats = statsRepo.create({ user_id: user.id });
-      await statsRepo.save(newStats);
-
-      const freshUser = await userRepo.findOne({
-        where: { id: user.id },
-        relations: ["stats"],
-      });
-      return res.status(200).json(freshUser);
+    const { userId } = getAuth(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
     }
-
+    const user = await syncUserWithClerk(userId);
     res.json(user);
   } catch (err) {
     next(err);
   }
 });
 
-// POST /api/user/sync - This is now effectively handled by the GET /me endpoint on first login.
-// We can keep it for explicit frontend calls if needed, or remove it.
-// For now, I will simplify it and make it just an update operation.
+// POST /api/user/sync - Can be used for an explicit profile refresh.
 router.post(
   "/sync",
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const userRepo = AppDataSource.getRepository(User);
-      const clerkUser = await clerkClient.users.getUser(req.auth.userId);
-
-      const user = await userRepo.findOneBy({ id: req.auth.userId });
-
-      if (!user) {
-        return res.status(404).json({
-          error: "User not found for sync. Should be created on GET /me.",
-        });
+      const { userId } = getAuth(req);
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
-
-      user.name = `${clerkUser.firstName} ${clerkUser.lastName}`.trim();
-      user.username = clerkUser.username!;
-      user.imageUrl = clerkUser.imageUrl;
-      await userRepo.save(user);
-
-      const freshUser = await userRepo.findOne({
-        where: { id: user.id },
-        relations: ["stats"],
-      });
-
-      res.status(200).json(freshUser);
+      const user = await syncUserWithClerk(userId);
+      res.status(200).json(user);
     } catch (err) {
       next(err);
     }
