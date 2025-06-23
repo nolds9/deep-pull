@@ -1,0 +1,24 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Platform Implementation Plan
+
+The project is evolving from a single-game application to a multi-game platform. This plan is guided by the high-level vision in [nfl_gaming_architecture.md](mdc:docs/nfl_gaming_architecture.md).
+
+The implementation is broken down into two main workstreams:
+
+1.  **Frontend Rearchitecture**: The goal is to create a modular frontend that can host multiple games. The detailed plan is in [frontend_architecture.md](mdc:docs/frontend_architecture.md).
+2.  **Backend Enhancements**: The backend needs to be extended to support generic game management, data persistence for new games, and platform features like leaderboards.
+
+To track our progress, we are using two documents:
+-   **Task List**: A complete checklist of required tasks is available in [tasks.md](mdc:docs/tasks.md).
+-   **Working Memory**: The current status of implementation (in-progress, blocked, completed) is tracked in [working_memory.md](mdc:docs/working_memory.md).
+
+### Schema Management Strategy
+For managing the database schema, we will adopt the following convention:
+- **Data-Pipeline Tables**: Tables that are entirely managed and populated by the ETL process (e.g., `players`, `player_connections`, `player_seasonal_stats`) should have their schemas defined and created within `etl/mvp_pipeline.py`.
+- **Application Tables**: Tables that are related to application logic and user data (e.g., `users`, `user_stats`, `game_sessions`) should be managed using the dedicated `etl/manage_schema.py` script. This ensures a clear separation of concerns between the data pipeline and the application's own data models.
+
+When working on this rearchitecture, please consult these documents to understand the context, the specific tasks, and the current progress.
