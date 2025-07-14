@@ -14,6 +14,7 @@ from typing import Any, Tuple
 import gc
 import tempfile
 import time
+import urllib.error
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ class MVPETLPipeline:
     def __init__(self, db_url: str):
         self.engine = create_engine(db_url)
         self.current_year = datetime.now().year
-        self.start_year = 2020  # REDUCED to just 3 years for ultra-safety
+        self.start_year = 2020  # REDUCED to just 5 years for ultra-safety
         self.years = list(range(self.start_year, self.current_year + 1))
         self.roster_temp_file = os.path.join(tempfile.gettempdir(), 'rosters.parquet')
         
@@ -198,7 +199,8 @@ class MVPETLPipeline:
         master_to_merge = players_master_clean[['esb_id', 'display_name', 'college_name', 'position', 'gsis_id']].rename(columns={
             'position': 'position_master',
             'college_name': 'college_master',
-            'display_name': 'display_name_master'
+            'display_name': 'display_name_master',
+            'gsis_id': 'gsis_id_master'
         })
         
         merged = rosters.merge(master_to_merge, on='esb_id', how='left')
@@ -208,8 +210,10 @@ class MVPETLPipeline:
         merged['player_name'] = merged['display_name_master'].fillna(merged['player_name'])
         merged['college'] = merged['college_master'].fillna(merged['college'])
         merged['position'] = merged['position_master'].fillna(merged['position'])
-        
-        columns_to_drop = ['display_name_master', 'college_master', 'position_master']
+        if 'gsis_id_master' in merged.columns and 'gsis_id' in merged.columns:
+            merged['gsis_id'] = merged['gsis_id_master'].fillna(merged['gsis_id'])
+
+        columns_to_drop = ['display_name_master', 'college_master', 'position_master', 'gsis_id_master']
         merged = merged.drop(columns=[col for col in columns_to_drop if col in merged.columns])
         
         print(f"✅ Final merged dataset shape: {merged.shape}")
@@ -378,6 +382,11 @@ class MVPETLPipeline:
         if connections_df.empty:
             return
         
+        if hasattr(self, '_dry_run') and self._dry_run:
+            # In a dry run, we just log what would happen but don't load.
+            # The count is handled by the calling function.
+            return
+
         try:
             connections_df.to_sql(
                 'player_connections',
@@ -413,70 +422,67 @@ class MVPETLPipeline:
                 
         return total_teammate_conns
 
-    def _process_and_load_connections(self) -> int:
-        """Process connections with global tracking"""
-        logger.info("Processing and loading connections with global limits...")
+    def _build_all_connections(self) -> pd.DataFrame:
+        """Builds and deduplicates all connection types, returning a clean DataFrame."""
+        logger.info("Building all connection types...")
         
-        self.connection_count = 0  # Reset counter
-        processed_teammate_pairs = set()
-        
-        # 1. Teammate connections (highest priority)
+        processed_pairs = set()
+        all_connections = []
+
+        # 1. Gather all teammate connections
         logger.info("Building teammate connections...")
         rosters_cols = pd.read_parquet(self.roster_temp_file, columns=['season'])
         years = sorted(rosters_cols['season'].unique())
         del rosters_cols
         
-        is_first_batch = True
         for year in years:
-            if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
-                logger.warning(f"Connection limit reached, stopping at year {year}")
-                break
-                
             rosters_for_year = pd.read_parquet(self.roster_temp_file, filters=[('season', '==', year)])
-            connections = self._build_teammate_connections(rosters_for_year, processed_teammate_pairs)
+            teammate_conns = self._build_teammate_connections(rosters_for_year, processed_pairs)
+            if teammate_conns:
+                all_connections.extend(teammate_conns)
+
+        # 2. Gather all other connections
+        logger.info("Building other connections (college, draft)...")
+        other_rosters_df = pd.read_parquet(
+            self.roster_temp_file, 
+            columns=['id', 'college', 'player_name', 'draft_year', 'position', 'season']
+        )
+        college_conns = self._build_college_connections(other_rosters_df, processed_pairs)
+        if college_conns:
+            all_connections.extend(college_conns)
             
-            if connections:
-                connections_df = pd.DataFrame(connections)
-                logger.info(f"Loading {len(connections_df)} teammate connections for {year}...")
-                self._load_connections_batch(connections_df)
-                self.connection_count += len(connections_df)
-                
-                logger.info(f"Total connections so far: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
+        draft_conns = self._build_draft_connections(other_rosters_df, processed_pairs)
+        if draft_conns:
+            all_connections.extend(draft_conns)
         
-        # 2. Other connections (if room left)
-        remaining_capacity = self.MAX_TOTAL_CONNECTIONS - self.connection_count
-        if remaining_capacity > 100:  # Only if significant room left
-            logger.info(f"Adding other connections (remaining capacity: {remaining_capacity})")
-            
-            other_rosters_df = pd.read_parquet(
-                self.roster_temp_file, 
-                columns=['id', 'college', 'player_name', 'draft_year', 'position', 'season']
-            )
-            
-            # College connections
-            if self.connection_count < self.MAX_TOTAL_CONNECTIONS:
-                college_connections = self._build_college_connections(other_rosters_df)
-                if college_connections:
-                    connections_df = pd.DataFrame(college_connections)
-                    self._load_connections_batch(connections_df)
-                    self.connection_count += len(connections_df)
-                    logger.info(f"Total after college: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
-            
-            # Draft connections (if still room)
-            if self.connection_count < self.MAX_TOTAL_CONNECTIONS:
-                draft_connections = self._build_draft_connections(other_rosters_df)
-                if draft_connections:
-                    connections_df = pd.DataFrame(draft_connections)
-                    self._load_connections_batch(connections_df)
-                    self.connection_count += len(connections_df)
-                    logger.info(f"Total after draft: {self.connection_count}/{self.MAX_TOTAL_CONNECTIONS}")
-            
-            del other_rosters_df
-            gc.collect()
+        del other_rosters_df
+        gc.collect()
+
+        if not all_connections:
+            logger.warning("No connections were generated.")
+            return pd.DataFrame()
+
+        # 3. Create a single DataFrame and deduplicate
+        logger.info(f"Aggregated {len(all_connections):,} raw connections. Now deduplicating...")
         
-        logger.info(f"Final connection count: {self.connection_count}")
-        return self.connection_count
-    
+        connections_df = pd.DataFrame(all_connections)
+        
+        # This is the key safety net
+        connections_df.drop_duplicates(subset=['player1_id', 'player2_id', 'connection_type'], inplace=True)
+        
+        logger.info(f"Returning {len(connections_df):,} final, unique connections.")
+        return connections_df
+
+    def _process_and_load_connections(self) -> int:
+        """DEPRECATED: This logic is now handled in run_mvp_etl directly."""
+        # This function is kept for now to avoid breaking old entry points, but it should not be used.
+        logger.warning("Using deprecated _process_and_load_connections function.")
+        connections_df = self._build_all_connections()
+        if not connections_df.empty:
+            self._load_connections_batch(connections_df)
+            return len(connections_df)
+        return 0
+
     def _build_teammate_connections(self, rosters_df: pd.DataFrame, processed_pairs: set) -> list:
         """Build skill position teammate connections with rich metadata"""
         connections = []
@@ -503,7 +509,10 @@ class MVPETLPipeline:
             for i, player1 in enumerate(players):
                 for player2 in players[i+1:]:
                     pair = tuple(sorted((player1, player2)))
-                    if pair in processed_pairs:
+                    
+                    # Use a key that matches the DB primary key structure
+                    pair_key = pair + ('teammate',)
+                    if pair_key in processed_pairs:
                         continue
 
                     if len(connections) >= self.MAX_TOTAL_CONNECTIONS:
@@ -531,22 +540,24 @@ class MVPETLPipeline:
                         ),
                         'involves_star': p1_is_star or p2_is_star
                     }
+
+                    # Ensure consistent ordering for the primary key
+                    p1_id_final, p2_id_final = pair
+
                     connections.append({
-                        'player1_id': player1,
-                        'player2_id': player2,
+                        'player1_id': p1_id_final,
+                        'player2_id': p2_id_final,
                         'connection_type': 'teammate',
                         'metadata': metadata
                     })
-                    processed_pairs.add(pair)
+                    processed_pairs.add(pair_key)
         logger.info(f"Created {len(connections)} skill position teammate connections")
         logger.info(f"Star player connections: {star_connection_count}")
         return connections
     
-    def _build_college_connections(self, rosters_df: pd.DataFrame) -> list:
+    def _build_college_connections(self, rosters_df: pd.DataFrame, processed_pairs: set) -> list:
         """Enhanced college connections for skill positions"""
         connections = []
-        if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
-            return connections
         logger.info("Building skill position college connections...")
         skill_players_with_college = rosters_df[
             (rosters_df['college'].notna()) &
@@ -571,13 +582,20 @@ class MVPETLPipeline:
             if len(players) >= 2:
                 for i, player1 in enumerate(players):
                     for player2 in players[i+1:]:
-                        if self.connection_count + len(connections) >= self.MAX_TOTAL_CONNECTIONS:
-                            return connections
+                        
+                        # Use a unique tuple for the check to allow same pair with different types
+                        pair_key = tuple(sorted((player1, player2))) + ('college',)
+                        if pair_key in processed_pairs:
+                            continue
+
                         p1_pos = group[group['id'] == player1]['position'].iloc[0]
                         p2_pos = group[group['id'] == player2]['position'].iloc[0]
+                        
+                        p1_id_final, p2_id_final = min(player1, player2), max(player1, player2)
+
                         connections.append({
-                            'player1_id': player1,
-                            'player2_id': player2,
+                            'player1_id': p1_id_final,
+                            'player2_id': p2_id_final,
                             'connection_type': 'college',
                             'metadata': {
                                 'college': college,
@@ -585,17 +603,14 @@ class MVPETLPipeline:
                                 'same_position': p1_pos == p2_pos
                             }
                         })
+                        processed_pairs.add(pair_key)
+
         logger.info(f"Created {len(connections)} skill position college connections")
         return connections
     
-    def _build_draft_connections(self, rosters_df: pd.DataFrame) -> list:
+    def _build_draft_connections(self, rosters_df: pd.DataFrame, processed_pairs: set) -> list:
         """Draft connections with ultra-safe limits"""
         connections = []
-        
-        # Early exit if already at limit
-        if self.connection_count >= self.MAX_TOTAL_CONNECTIONS:
-            logger.warning("Already at connection limit, skipping draft connections")
-            return connections
         
         logger.info("Building draft connections with strict limits...")
         
@@ -614,17 +629,21 @@ class MVPETLPipeline:
             if len(players) >= 2:
                 for i, player1 in enumerate(players):
                     for player2 in players[i+1:]:
-                        # EMERGENCY BRAKE
-                        if self.connection_count + len(connections) >= self.MAX_TOTAL_CONNECTIONS:
-                            logger.warning(f"Hit connection limit during draft connections")
-                            return connections
+
+                        # Use a unique tuple for the check to allow same pair with different types
+                        pair_key = tuple(sorted((player1, player2))) + ('draft_class',)
+                        if pair_key in processed_pairs:
+                            continue
                         
+                        p1_id_final, p2_id_final = min(player1, player2), max(player1, player2)
+
                         connections.append({
-                            'player1_id': player1,
-                            'player2_id': player2,
+                            'player1_id': p1_id_final,
+                            'player2_id': p2_id_final,
                             'connection_type': 'draft_class',
                             'metadata': {'draft_year': int(draft_year)}
                         })
+                        processed_pairs.add(pair_key)
         
         logger.info(f"Created {len(connections)} draft connections")
         return connections
@@ -793,24 +812,60 @@ class MVPETLPipeline:
                 else:
                     stats_df[col] = pd.to_numeric(stats_df[col], errors='coerce').fillna(0)
 
-            passing_leaders = stats_df.loc[stats_df.groupby(['season', 'team'])['passing_yards'].idxmax()]
-            passing_leaders = passing_leaders[['season', 'team', 'player_id']].rename(columns={'player_id': 'passing_leader_id'})
+            # Find leader records
+            passing_leaders_df = stats_df.loc[stats_df.groupby(['season', 'team'])['passing_yards'].idxmax()]
+            rushing_leaders_df = stats_df.loc[stats_df.groupby(['season', 'team'])['rushing_yards'].idxmax()]
+            
+            # Format passing_leader into a JSON object
+            passing_leader_series = passing_leaders_df.apply(
+                lambda row: {
+                    'player_id': row['player_id'],
+                    'player_name': row['player_name'],
+                    'position': row.get('position', 'UNK'),
+                    'passing_yards': row['passing_yards'],
+                    'passing_tds': row.get('passing_tds', 0)
+                },
+                axis=1
+            )
+            passing_leaders = pd.DataFrame({
+                'season': passing_leaders_df['season'],
+                'team': passing_leaders_df['team'],
+                'passing_leader': passing_leader_series
+            }).set_index(['season', 'team'])
 
-            rushing_leaders = stats_df.loc[stats_df.groupby(['season', 'team'])['rushing_yards'].idxmax()]
-            rushing_leaders = rushing_leaders[['season', 'team', 'player_id']].rename(columns={'player_id': 'rushing_leader_id'})
+            # Format rushing_leader into a JSON object
+            rushing_leader_series = rushing_leaders_df.apply(
+                lambda row: {
+                    'player_id': row['player_id'],
+                    'player_name': row['player_name'],
+                    'position': row.get('position', 'UNK'),
+                    'rushing_yards': row['rushing_yards'],
+                    'rushing_tds': row.get('rushing_tds', 0)
+                },
+                axis=1
+            )
+            rushing_leaders = pd.DataFrame({
+                'season': rushing_leaders_df['season'],
+                'team': rushing_leaders_df['team'],
+                'rushing_leader': rushing_leader_series
+            }).set_index(['season', 'team'])
+            
+            receiving_leaders_df = stats_df[stats_df['receiving_yards'] > 0].sort_values('receiving_yards', ascending=False)
+            receiving_leaders = receiving_leaders_df.groupby(['season', 'team']) \
+                .apply(lambda x: x.head(3)[['player_id', 'player_name', 'position', 'receiving_yards', 'receptions']].to_dict('records')) \
+                .reset_index(name='receiving_leaders').set_index(['season', 'team'])
 
-            receiving_leaders = stats_df.sort_values('receiving_yards', ascending=False) \
-                .groupby(['season', 'team']) \
-                .apply(lambda x: x.head(3)[['player_id', 'player_name', 'receiving_yards', 'receptions']].to_dict('records')) \
-                .reset_index(name='receiving_leaders')
-
+            # Merge all leaders together
             team_leaders = pd.merge(passing_leaders, rushing_leaders, on=['season', 'team'], how='outer')
             team_leaders = pd.merge(team_leaders, receiving_leaders, on=['season', 'team'], how='outer')
             
+            team_leaders.reset_index(inplace=True)
             team_leaders.rename(columns={'team': 'team_id'}, inplace=True)
-
-            team_leaders['passing_leader_id'] = team_leaders['passing_leader_id'].where(pd.notna(team_leaders['passing_leader_id']), None)
-            team_leaders['rushing_leader_id'] = team_leaders['rushing_leader_id'].where(pd.notna(team_leaders['rushing_leader_id']), None)
+            
+            # Ensure JSON columns don't have NaN values which cause loading issues
+            team_leaders['passing_leader'] = team_leaders['passing_leader'].where(pd.notna(team_leaders['passing_leader']), None)
+            team_leaders['rushing_leader'] = team_leaders['rushing_leader'].where(pd.notna(team_leaders['rushing_leader']), None)
+            team_leaders['receiving_leaders'] = team_leaders['receiving_leaders'].where(pd.notna(team_leaders['receiving_leaders']), None)
             
             if hasattr(self, '_dry_run') and self._dry_run:
                 logger.info(f"DRY RUN - Would load {len(team_leaders)} team season leader records.")
@@ -821,7 +876,7 @@ class MVPETLPipeline:
                     if_exists='append',
                     index=False,
                     method='multi',
-                    dtype={'receiving_leaders': JSON}
+                    dtype={'passing_leader': JSON, 'rushing_leader': JSON, 'receiving_leaders': JSON}
                 )
                 logger.info(f"Loaded {len(team_leaders)} team season leader records.")
 
@@ -887,111 +942,201 @@ class MVPETLPipeline:
         return len(stats_to_load), gsis_to_canonical_map
 
     def run_mvp_etl(self):
-        """Main ETL process for MVP - with safe estimation and incremental loading"""
-        logger.info("Starting MVP ETL Pipeline...")
+        """Main ETL process for MVP - using weekly data for accuracy"""
+        logger.info("Starting MVP ETL Pipeline with weekly data processing...")
         start_time = datetime.now()
         
         try:
-            # Step 1: Fetch all seasonal stats to identify significant players
-            logger.info("Fetching all seasonal stats to identify significant players...")
-            all_stats = []
+            # Step 1: Fetch all weekly stats to get the most accurate data source
+            logger.info("Fetching all weekly stats for all years...")
+            
+            weekly_data_frames = []
             for year in self.years:
                 try:
-                    logger.info(f"Fetching seasonal stats for {year}...")
-                    year_stats = nfl.import_seasonal_data([year])
-                    all_stats.append(year_stats)
+                    logger.info(f"Fetching weekly data for {year}...")
+                    year_weekly_data = nfl.import_weekly_data([year])
+                    weekly_data_frames.append(year_weekly_data)
+                except urllib.error.HTTPError as e:
+                    logger.warning(f"HTTP Error fetching data for {year}, it might not be available yet. Skipping. Error: {e}")
+                    continue
                 except Exception as e:
-                    logger.warning(f"Could not fetch stats for {year}: {e}")
+                    logger.warning(f"An unexpected error occurred fetching data for {year}. Skipping. Error: {e}")
+                    continue
             
-            if not all_stats:
-                raise Exception("Failed to load any seasonal stats data. Cannot determine significant players.")
+            if not weekly_data_frames:
+                logger.error("Failed to fetch any weekly data for the specified years. Aborting pipeline.")
+                raise Exception("No weekly data could be fetched.")
+
+            # --- NEW: Load roster data to get game_type for filtering seasonal stats ---
+            logger.info("Fetching weekly rosters to get game_type for stats filtering...")
+            roster_frames = []
+            for year in self.years:
+                try:
+                    # Note: import_weekly_rosters is what has game_type
+                    year_rosters = nfl.import_weekly_rosters([year])
+                    roster_frames.append(year_rosters)
+                except Exception as e:
+                    logger.warning(f"Could not load weekly rosters for {year} to get game_type: {e}")
             
-            all_stats_df = pd.concat(all_stats, ignore_index=True)
-            if 'player_id' in all_stats_df.columns:
-                all_stats_df.rename(columns={'player_id': 'gsis_id'}, inplace=True)
-            
-            # Enrich stats with team data for leader calculations
-            try:
-                logger.info("Enriching seasonal stats with team information...")
-                # Weekly rosters are more reliable for getting team info for each player/season
-                all_rosters = pd.concat([nfl.import_weekly_rosters([year]) for year in self.years], ignore_index=True)
+            all_rosters_df = pd.concat(roster_frames, ignore_index=True) if roster_frames else pd.DataFrame()
+            # --- END NEW ---
+
+            all_weekly_stats_df = pd.concat(
+                weekly_data_frames,
+                ignore_index=True
+            )
+            logger.info(f"Successfully fetched weekly data. Shape: {all_weekly_stats_df.shape}")
+
+            # Standardize gsis_id column name for mapping
+            if 'player_id' in all_weekly_stats_df.columns:
+                all_weekly_stats_df.rename(columns={'player_id': 'gsis_id'}, inplace=True)
+
+            # --- NEW: Merge game_type into stats dataframe ---
+            if not all_rosters_df.empty:
+                if 'player_id' in all_rosters_df.columns:
+                    all_rosters_df.rename(columns={'player_id': 'gsis_id'}, inplace=True)
                 
-                # --- NORMALIZE TEAM ABBRS IN WEEKLY ROSTERS ---
-                if 'team' in all_rosters.columns:
-                    all_rosters['team'] = all_rosters['team'].apply(self._normalize_team_abbr)
-                # --- END NORMALIZATION ---
+                game_type_info = all_rosters_df[['gsis_id', 'season', 'week', 'game_type']].drop_duplicates()
+                all_weekly_stats_df = pd.merge(all_weekly_stats_df, game_type_info, on=['gsis_id', 'season', 'week'], how='left')
+                logger.info("Merged game_type column into weekly stats for accurate filtering.")
+            # --- END NEW ---
 
-                # A player can be on multiple teams in a season. For seasonal stats,
-                # we'll associate them with their last team of the season.
-                team_map = all_rosters[['gsis_id', 'season', 'week', 'team']].dropna(subset=['gsis_id'])
-                team_map = team_map.sort_values('week').drop_duplicates(subset=['gsis_id', 'season'], keep='last')
-                all_stats_df = pd.merge(all_stats_df, team_map[['gsis_id', 'season', 'team']], on=['gsis_id', 'season'], how='left')
-                logger.info("Successfully enriched stats with team data.")
-            except Exception as e:
-                logger.warning(f"Could not enrich stats with team data, team leaders may be skipped. Error: {e}")
-
-            # Identify players who have actually had some impact
-            significant_players_df = all_stats_df[all_stats_df['fantasy_points_ppr'] > 1]
+            # --- Identify Significant Players ---
+            # We still need a concept of "significant" players to build our player graph around.
+            # We'll derive this from the weekly data itself.
+            stat_cols_for_significance = ['fantasy_points_ppr', 'passing_yards', 'rushing_yards', 'receiving_yards']
+            for col in stat_cols_for_significance:
+                if col in all_weekly_stats_df.columns:
+                    all_weekly_stats_df[col] = pd.to_numeric(all_weekly_stats_df[col], errors='coerce').fillna(0)
+            
+            # Aggregate weekly data to find players with meaningful seasonal totals.
+            seasonal_totals_for_filtering = all_weekly_stats_df.groupby(['gsis_id', 'season'])['fantasy_points_ppr'].sum().reset_index()
+            significant_players_df = seasonal_totals_for_filtering[seasonal_totals_for_filtering['fantasy_points_ppr'] > 1]
             significant_gsis_ids = set(significant_players_df['gsis_id'].dropna().unique())
-            logger.info(f"Identified {len(significant_gsis_ids)} significant players with fantasy points > 1.")
+            logger.info(f"Identified {len(significant_gsis_ids)} significant players based on weekly data totals.")
 
-            # NEW: Map GSIS IDs to ESB IDs for early filtering
-            logger.info("Mapping significant GSIS IDs to ESB IDs for early filtering...")
+            # --- Map GSIS IDs to ESB IDs (Canonical ID) ---
+            logger.info("Mapping significant GSIS IDs to ESB IDs for canonical ID...")
             players_master = nfl.import_players()
             id_map = players_master.dropna(subset=['gsis_id', 'esb_id'])[['gsis_id', 'esb_id']]
             gsis_to_esb_map = pd.Series(id_map.esb_id.values, index=id_map.gsis_id).to_dict()
-
             significant_esb_ids = {gsis_to_esb_map.get(gsis_id) for gsis_id in significant_gsis_ids}
-            significant_esb_ids.discard(None) # remove None if any gsis_id was not found
+            significant_esb_ids.discard(None)
             logger.info(f"Mapped to {len(significant_esb_ids)} significant ESB IDs.")
 
             # Step 2: Extract and clean player data, filtered by significance
-            players_df = self.extract_players(significant_esb_ids)
+            # Pass the loaded rosters to avoid re-fetching
+            players_df = self.extract_players(significant_esb_ids, rosters=all_rosters_df)
+            
+            # --- Perform Aggregations from Weekly Data ---
+            # Filter the full weekly data to our significant players before aggregation
+            weekly_df_filtered = all_weekly_stats_df[all_weekly_stats_df['gsis_id'].isin(significant_gsis_ids)].copy()
+            
+            # Standardize team column name
+            team_col = next((col for col in ['recent_team', 'team', 'player_team'] if col in weekly_df_filtered.columns), None)
+            if team_col:
+                if team_col != 'team':
+                    weekly_df_filtered.rename(columns={team_col: 'team'}, inplace=True)
+            else:
+                # If no team column, we might be able to get it from the roster data
+                if not all_rosters_df.empty:
+                    team_info = all_rosters_df[['gsis_id', 'season', 'week', 'team']].drop_duplicates()
+                    weekly_df_filtered = pd.merge(weekly_df_filtered, team_info, on=['gsis_id', 'season', 'week'], how='left')
+                    logger.info("Added 'team' column from roster data to stats data.")
+
+            if 'team' not in weekly_df_filtered.columns:
+                 raise ValueError("Could not find or add a team column in the weekly stats data.")
+
+            # --- NORMALIZE TEAM ABBRS IN WEEKLY STATS ---
+            logger.info("Normalizing team abbreviations in weekly stats data...")
+            weekly_df_filtered['team'] = weekly_df_filtered['team'].apply(self._normalize_team_abbr)
+            # --- END NORMALIZATION ---
+
+            # --- FILTER FOR REGULAR SEASON ONLY ---
+            # This is the key fix to exclude inflated playoff stats from seasonal totals.
+            if 'game_type' in weekly_df_filtered.columns:
+                logger.info("Filtering weekly stats to REGULAR SEASON only...")
+                original_rows = len(weekly_df_filtered)
+                weekly_df_filtered = weekly_df_filtered[weekly_df_filtered['game_type'] == 'REG'].copy()
+                logger.info(f"  → Filtered rows: {original_rows:,} → {len(weekly_df_filtered):,}")
+            else:
+                logger.warning("Could not find 'game_type' column to filter for regular season. Stats may include playoffs.")
+            # --- END FILTER ---
+
+            # Define stat columns for aggregation
+            stat_columns = [
+                'fantasy_points', 'fantasy_points_ppr',
+                'passing_yards', 'passing_tds', 'interceptions',
+                'rushing_yards', 'rushing_tds', 'carries',
+                'receiving_yards', 'receiving_tds', 'receptions', 'targets'
+            ]
+            for col in stat_columns:
+                if col not in weekly_df_filtered.columns: weekly_df_filtered[col] = 0
+                else: weekly_df_filtered[col] = pd.to_numeric(weekly_df_filtered[col], errors='coerce').fillna(0)
+
+            # Aggregation 1: For Team Leader calculations (player stats are per-team)
+            logger.info("Aggregating weekly stats for team leader calculations...")
+            team_specific_stats_df = weekly_df_filtered.groupby(
+                ['gsis_id', 'season', 'team']
+            )[stat_columns].sum().reset_index()
+
+            # Add player_name and position to the dataframe for the leader calculations.
+            player_descriptors = weekly_df_filtered[['gsis_id', 'player_name', 'position']].drop_duplicates(subset=['gsis_id'])
+            team_specific_stats_df = pd.merge(team_specific_stats_df, player_descriptors, on='gsis_id', how='left')
+            
+            logger.info(f"Created team-specific stats df with shape: {team_specific_stats_df.shape}")
+
+            # Aggregation 2: For overall player seasonal stats (total stats for a player in a season)
+            logger.info("Aggregating weekly stats for player_seasonal_stats table...")
+            overall_player_stats_df = weekly_df_filtered.groupby(
+                ['gsis_id', 'season']
+            )[stat_columns].sum().reset_index()
+            logger.info(f"Created overall seasonal stats df with shape: {overall_player_stats_df.shape}")
+
+            # Now, proceed with loading data, using these new accurate dataframes
             players_count = len(players_df)
             teams_count = 0
             seasonal_stats_count = 0
             team_leaders_count = 0
+            connections_count = 0
             
+            # --- Build and deduplicate connections happens for both real and dry runs ---
+            connections_df = self._build_all_connections()
+            connections_count = len(connections_df)
+
             if hasattr(self, '_dry_run') and self._dry_run:
                 logger.info("DRY RUN - Skipping database load")
-                teams_count = self._extract_and_load_teams()
-                logger.info("DRY RUN - Using safe estimation instead of building all connections...")
-                estimates = self.estimate_connection_count()
-                connections_count = estimates.get('capped_total', 0)
-                logger.info(f"DRY RUN Results:")
-                logger.info(f"  Players: {players_count}")
-                logger.info(f"  Teams: {teams_count}")
-                logger.info(f"  Estimated connections: {connections_count}")
-                logger.info(f"  Safety status: {'✅ SAFE' if estimates.get('safe', False) else '❌ UNSAFE'}")
             else:
                 # Real run - load to database
                 logger.info("REAL RUN - Loading to database...")
-                
-                # Step 2a: Clear out old data from pipeline-managed tables
                 self._clear_data_pipeline_tables()
-
-                # Step 2b: Load teams
+                
                 teams_count = self._extract_and_load_teams()
                 logger.info(f"✅ Loaded {teams_count} teams")
                 
-                # Step 3: Load players table
                 self._load_players(players_df)
                 logger.info(f"✅ Loaded {players_count} players")
                 
-                # Step 4: Load seasonal stats for these players
-                seasonal_stats_count, gsis_map = self.extract_and_load_seasonal_stats(players_df, all_stats_df)
+                # Load stats and leaders
+                seasonal_stats_count, gsis_to_canonical_map = self.extract_and_load_seasonal_stats(players_df, overall_player_stats_df)
                 logger.info(f"✅ Loaded {seasonal_stats_count} seasonal stat records")
 
-                # Step 4b: Calculate and load team seasonal leaders
-                team_leaders_count = self._calculate_and_load_team_season_leaders(all_stats_df, gsis_map)
+                team_leaders_count = self._calculate_and_load_team_season_leaders(team_specific_stats_df, gsis_to_canonical_map)
                 logger.info(f"✅ Loaded {team_leaders_count} team season leader records")
+                
+                # Apply global connection limit before loading
+                if connections_count > self.MAX_TOTAL_CONNECTIONS:
+                    logger.warning(f"Total connections ({connections_count}) exceeds limit ({self.MAX_TOTAL_CONNECTIONS}). Truncating.")
+                    connections_df = connections_df.head(self.MAX_TOTAL_CONNECTIONS)
+                    connections_count = self.MAX_TOTAL_CONNECTIONS
+
+                # Finally, load the connections
+                self._load_connections_batch(connections_df)
+                logger.info(f"✅ Loaded {connections_count} connections")
 
                 del players_df
                 gc.collect()
 
-                # Step 5: Build and load connections (will use the filtered temp file)
-                connections_count = self._process_and_load_connections()
-                logger.info(f"✅ Loaded {connections_count} connections")
                 self._create_indexes()
                 self._validate_data_quality()
             

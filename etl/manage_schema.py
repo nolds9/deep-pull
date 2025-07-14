@@ -113,8 +113,8 @@ def define_schema(metadata: MetaData):
         Column('id', Integer, primary_key=True, autoincrement=True),
         Column('team_id', String, ForeignKey('teams.id', ondelete='CASCADE')),
         Column('season', Integer, index=True),
-        Column('passing_leader_id', String, ForeignKey('players.id', ondelete='CASCADE'), nullable=True),
-        Column('rushing_leader_id', String, ForeignKey('players.id', ondelete='CASCADE'), nullable=True),
+        Column('passing_leader', JSON, nullable=True),
+        Column('rushing_leader', JSON, nullable=True),
         Column('receiving_leaders', JSON, nullable=True),
         Column('createdAt', DateTime, server_default=func.now())
     )

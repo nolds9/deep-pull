@@ -26,19 +26,11 @@ export class TeamSeasonLeaders {
   @Column({ type: "int" })
   season!: number;
 
-  @Column({ nullable: true })
-  passing_leader_id?: string;
+  @Column({ type: "jsonb", nullable: true })
+  passing_leader?: any;
 
-  @ManyToOne(() => Player)
-  @JoinColumn({ name: "passing_leader_id" })
-  passing_leader?: Player;
-
-  @Column({ nullable: true })
-  rushing_leader_id?: string;
-
-  @ManyToOne(() => Player)
-  @JoinColumn({ name: "rushing_leader_id" })
-  rushing_leader?: Player;
+  @Column({ type: "jsonb", nullable: true })
+  rushing_leader?: any;
 
   @Column({ type: "jsonb", nullable: true })
   receiving_leaders?: any;
