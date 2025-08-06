@@ -7,6 +7,7 @@ import { Difficulty, GameManager } from "./services/game-manager";
 import * as dotenv from "dotenv";
 import playerRoutes from "./routes/player";
 import userRoutes from "./routes/user";
+import leaderboardRoutes from "./routes/leaderboard";
 import { logger } from "./utils/logger";
 import { clerkClient } from "@clerk/clerk-sdk-node";
 
@@ -42,6 +43,7 @@ app.use((req, res, next) => {
 
 app.use("/api/players", playerRoutes);
 app.use("/api/user", userRoutes);
+app.use("/api/leaderboard", leaderboardRoutes);
 
 // Error handling middleware
 app.use(

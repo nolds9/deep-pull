@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import { logger } from "../utils/logger";
 import { PlayerSeasonalStats } from "../entity/PlayerSeasonalStats";
 import { UserStats } from "../entity/UserStats";
+import { GameSession as DBGameSession } from "../entity/GameSession";
 import { In } from "typeorm";
 
 export type GameMode = "single" | "multiplayer";
@@ -640,6 +641,36 @@ export class GameManager {
       clearTimeout(session.timerId);
     }
 
+    // Calculate game duration
+    const durationMs = Date.now() - session.startTime;
+
+    // Persist game session to database
+    try {
+      const gameSessionRepo = AppDataSource.getRepository(DBGameSession);
+      const playerIds = Array.from(session.players.values()).map(
+        (p) => p.userId
+      );
+
+      const dbGameSession = new DBGameSession();
+      dbGameSession.id = session.id;
+      dbGameSession.game_type = "player_rush"; // Current game type
+      dbGameSession.game_mode = session.mode;
+      dbGameSession.difficulty = session.difficulty;
+      dbGameSession.player1_id = playerIds[0];
+      dbGameSession.player2_id = playerIds[1] || undefined; // undefined for single player
+      dbGameSession.start_player_id = session.startPlayer.id;
+      dbGameSession.end_player_id = session.endPlayer.id;
+      dbGameSession.winner_id = winnerId || undefined;
+      dbGameSession.winning_path = session.winningPath || undefined;
+      dbGameSession.duration_ms = durationMs;
+
+      await gameSessionRepo.save(dbGameSession);
+      logger.info(`Game session ${session.id} persisted to database`);
+    } catch (error) {
+      logger.error(`Failed to persist game session ${session.id}:`, error);
+    }
+
+    // Update user stats
     const statsRepo = AppDataSource.getRepository(UserStats);
     if (reason === "opponent_disconnected" && winnerId) {
       const stats = await statsRepo.findOneBy({ user_id: winnerId });

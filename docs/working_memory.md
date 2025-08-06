@@ -22,6 +22,17 @@ This document tracks the live implementation status of the platform rearchitectu
   - Refactored `etl/mvp_pipeline.py` to clear and append data, respecting the master schema.
 - [x] **Create Backend Entities**:
   - Created or updated all TypeORM entities in `backend/src/entity/` to perfectly match the database schema, including creating `GameSession.ts`, `Team.ts`, and `TeamSeasonLeaders.ts`.
+- [x] **Game Session Persistence**:
+  - Updated `GameManager` to persist completed game sessions to the PostgreSQL database.
+  - Added database persistence logic to the `_endGame()` method in `backend/src/services/game-manager.ts`.
+  - Game sessions now include duration, winner, winning path, and all relevant metadata.
+- [x] **Leaderboard API**:
+  - Created comprehensive leaderboard API with `/api/leaderboard` endpoint.
+  - Supports filtering by game type, difficulty, mode, and time range.
+  - Includes user-specific stats endpoint at `/api/leaderboard/user/:userId`.
+  - Provides ranked results with win rates, best times, and game statistics.
+  - Fixed TypeORM configuration to include all entities (GameSession, Team, TeamSeasonLeaders).
+  - Successfully tested all API endpoints with comprehensive test suite.
 
 ---
 

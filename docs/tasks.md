@@ -34,16 +34,16 @@ The goal is to evolve the backend from a single-game server to a multi-game plat
   - [ ] Refactor `GameManager` to support multiple game types.
   - [ ] Update the `joinQueue` socket event to accept a `gameType` parameter.
   - [ ] Implement a factory or strategy pattern for creating different game instances.
-- [ ] **Game Session Persistence**:
+- [x] **Game Session Persistence**:
   - [x] Create a `GameSession` table schema in `etl/manage_schema.py`.
   - [x] Create the `GameSession` TypeORM entity.
-  - [ ] Update `GameManager` to save completed game sessions to the PostgreSQL database.
+  - [x] Update `GameManager` to save completed game sessions to the PostgreSQL database.
 - [x] **Standardize Schema Management**:
   - [x] Use `etl/manage_schema.py` for creating and updating all application and data-pipeline tables.
-- [ ] **Leaderboard API**:
-  - [ ] Create a new REST API endpoint (e.g., `/api/leaderboard`).
-  - [ ] The endpoint should accept query parameters for `gameType` and `difficulty`.
-  - [ ] Implement logic to query persisted `game_sessions` and return ranked results.
+- [x] **Leaderboard API**:
+  - [x] Create a new REST API endpoint (e.g., `/api/leaderboard`).
+  - [x] The endpoint should accept query parameters for `gameType` and `difficulty`.
+  - [x] Implement logic to query persisted `game_sessions` and return ranked results.
 - [x] **Data for Future Games**:
   - [x] Add `teams` and `team_season_leaders` tables to `etl/manage_schema.py`.
   - [x] Create `Team` and `TeamSeasonLeaders` TypeORM entities.
