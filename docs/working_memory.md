@@ -4,7 +4,19 @@ This document tracks the live implementation status of the platform rearchitectu
 
 ## ⏳ In Progress
 
-- _No tasks currently in progress._
+- **Frontend Rearchitecture - Phase 1 Complete**:
+  - ✅ Installed `react-router-dom` for client-side routing
+  - ✅ Created new directory structure (`pages`, `games`, `layouts`, `hooks`, `services`, `styles`)
+  - ✅ Moved all game-specific components to `src/games/player-rush/`
+  - ✅ Moved page-level screens to `src/pages/`
+  - ✅ Created robust socket service with authentication and error handling
+  - ✅ Implemented `MainLayout` and `Header` components
+  - ✅ Refactored `App.tsx` to use React Router instead of XState for navigation
+  - ✅ Created custom `useSocket` hook for clean socket management
+  - ✅ Set up router configuration with proper navigation structure
+  - ✅ Fixed all TypeScript/linter errors
+  - ✅ Updated all screens to work with React Router navigation
+  - ✅ Created placeholder game screens for testing navigation flow
 
 ## 🛑 Blocked
 

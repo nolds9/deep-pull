@@ -6,25 +6,25 @@ This document outlines the necessary tasks to evolve the project into a scalable
 
 The goal is to implement the modular structure defined in `frontend_architecture.md`.
 
-- [ ] **Install Dependencies**:
-  - [ ] Install `react-router-dom` for client-side routing.
-- [ ] **Refactor Directory Structure**:
-  - [ ] Create `src/pages` for top-level screens.
-  - [ ] Create `src/games` to house individual game modules.
-  - [ ] Create `src/layouts` for shared layouts (e.g., Header, Footer).
-  - [ ] Create `src/hooks` for shared custom hooks.
-  - [ ] Create `src/services` for shared API/socket logic.
-  - [ ] Create `src/styles` for global styling and themes.
-- [ ] **Relocate Existing Code**:
-  - [ ] Move `HomeScreen`, `ProfileScreen` to `src/pages`.
-  - [ ] Create `src/games/player-rush` module.
-  - [ ] Move `GameScreen`, `LobbyScreen`, `EndGameScreen` into `src/games/player-rush/screens`.
-  - [ ] Move `gameMachine.ts` to `src/games/player-rush/state`.
-  - [ ] Move `socket.ts` to `src/services`.
-- [ ] **Update `App.tsx`**:
-  - [ ] Refactor `App.tsx` to use `react-router-dom` for navigation.
-  - [ ] Implement a `MainLayout` component.
-  - [ ] Remove the monolithic state-switching logic in favor of routing.
+- [x] **Install Dependencies**:
+  - [x] Install `react-router-dom` for client-side routing.
+- [x] **Refactor Directory Structure**:
+  - [x] Create `src/pages` for top-level screens.
+  - [x] Create `src/games` to house individual game modules.
+  - [x] Create `src/layouts` for shared layouts (e.g., Header, Footer).
+  - [x] Create `src/hooks` for shared custom hooks.
+  - [x] Create `src/services` for shared API/socket logic.
+  - [x] Create `src/styles` for global styling and themes.
+- [x] **Relocate Existing Code**:
+  - [x] Move `HomeScreen`, `ProfileScreen` to `src/pages`.
+  - [x] Create `src/games/player-rush` module.
+  - [x] Move `GameScreen`, `LobbyScreen`, `EndGameScreen` into `src/games/player-rush/screens`.
+  - [x] Move `gameMachine.ts` to `src/games/player-rush/state`.
+  - [x] Move `socket.ts` to `src/services`.
+- [x] **Update `App.tsx`**:
+  - [x] Refactor `App.tsx` to use `react-router-dom` for navigation.
+  - [x] Implement a `MainLayout` component.
+  - [x] Remove the monolithic state-switching logic in favor of routing.
 
 ## 🏗️ Backend Platform Enhancements
 
