@@ -1,6 +1,7 @@
 import React from "react";
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import { MainLayout } from "./layouts/MainLayout";
+import { GameProvider } from "./games/player-rush/context/GameContext";
 
 // Import pages
 import HomeScreen from "./pages/HomeScreen";
@@ -18,66 +19,82 @@ const router = createBrowserRouter([
   {
     path: "/",
     element: (
-      <MainLayout isHome={true}>
-        <HomeScreen />
-      </MainLayout>
+      <GameProvider>
+        <MainLayout isHome={true}>
+          <HomeScreen />
+        </MainLayout>
+      </GameProvider>
     ),
   },
   {
     path: "/profile",
     element: (
-      <MainLayout title="Profile">
-        <ProfileScreen />
-      </MainLayout>
+      <GameProvider>
+        <MainLayout title="Profile">
+          <ProfileScreen />
+        </MainLayout>
+      </GameProvider>
     ),
   },
   {
     path: "/mode",
     element: (
-      <MainLayout title="Select Mode">
-        <ModeScreen />
-      </MainLayout>
+      <GameProvider>
+        <MainLayout title="Select Mode">
+          <ModeScreen />
+        </MainLayout>
+      </GameProvider>
     ),
   },
   {
     path: "/how-to-play",
     element: (
-      <MainLayout title="How to Play">
-        <HowToPlayScreen />
-      </MainLayout>
+      <GameProvider>
+        <MainLayout title="How to Play">
+          <HowToPlayScreen />
+        </MainLayout>
+      </GameProvider>
     ),
   },
   // Game routes
   {
     path: "/game",
     element: (
-      <MainLayout title="Player Rush" maxWidth="xl">
-        <GameScreen />
-      </MainLayout>
+      <GameProvider>
+        <MainLayout title="Player Rush" maxWidth="xl">
+          <GameScreen />
+        </MainLayout>
+      </GameProvider>
     ),
   },
   {
     path: "/lobby",
     element: (
-      <MainLayout title="Game Lobby">
-        <LobbyScreen />
-      </MainLayout>
+      <GameProvider>
+        <MainLayout title="Game Lobby">
+          <LobbyScreen />
+        </MainLayout>
+      </GameProvider>
     ),
   },
   {
     path: "/queue",
     element: (
-      <MainLayout title="Finding Players...">
-        <QueueScreen />
-      </MainLayout>
+      <GameProvider>
+        <MainLayout title="Finding Players...">
+          <QueueScreen />
+        </MainLayout>
+      </GameProvider>
     ),
   },
   {
     path: "/end-game",
     element: (
-      <MainLayout title="Game Over">
-        <EndGameScreen />
-      </MainLayout>
+      <GameProvider>
+        <MainLayout title="Game Over">
+          <EndGameScreen />
+        </MainLayout>
+      </GameProvider>
     ),
   },
 ]);

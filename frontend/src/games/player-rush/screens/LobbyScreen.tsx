@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Button, Typography, Paper, Chip, Stack } from "@mui/material";
-import { useNavigate } from "react-router-dom";
+import { useGame } from "../context/GameContext";
 
 const PlayerCard: React.FC<{ name: string; isReady: boolean }> = ({
   name,
@@ -26,17 +26,15 @@ const PlayerCard: React.FC<{ name: string; isReady: boolean }> = ({
 );
 
 const LobbyScreen: React.FC = () => {
-  const navigate = useNavigate();
-  const [myReady, setMyReady] = React.useState(false);
-  const [opponentReady] = React.useState(false);
+  const { state, playerReady } = useGame();
+  const { myReady, opponentReady } = state.context;
 
   const handleReady = () => {
-    setMyReady(true);
-    // In a real implementation, this would emit a socket event
+    playerReady();
   };
 
   const handleBack = () => {
-    navigate("/mode");
+    // The game context will handle navigation back to mode selection
   };
 
   return (

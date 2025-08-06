@@ -96,30 +96,35 @@ class SocketService {
   // Game-specific methods
   joinQueue(difficulty: string) {
     if (this.socket) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this.socket as any).emit("joinQueue", { difficulty });
     }
   }
 
   leaveQueue() {
     if (this.socket) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this.socket as any).emit("leaveQueue");
     }
   }
 
   submitPath(sessionId: string, path: string[]) {
     if (this.socket) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this.socket as any).emit("submitPath", { sessionId, path });
     }
   }
 
   playerReady(sessionId: string) {
     if (this.socket) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this.socket as any).emit("playerReady", { sessionId });
     }
   }
 
   giveUp(sessionId: string) {
     if (this.socket) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this.socket as any).emit("giveUp", { sessionId });
     }
   }

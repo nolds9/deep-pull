@@ -6,6 +6,7 @@ import {
   Stack,
   ToggleButton,
   ToggleButtonGroup,
+  ToggleButtonProps,
 } from "@mui/material";
 import type { GameMode, Difficulty } from "../state/gameMachine";
 
@@ -18,7 +19,7 @@ interface ModeScreenProps {
   onBack: () => void;
 }
 
-const StyledToggleButton = (props: any) => (
+const StyledToggleButton = (props: ToggleButtonProps) => (
   <ToggleButton
     {...props}
     sx={{

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import {
   Box,
   Button,
@@ -6,13 +6,19 @@ import {
   Stack,
   CircularProgress,
 } from "@mui/material";
-import { useNavigate } from "react-router-dom";
+import { useGame } from "../context/GameContext";
 
 const QueueScreen: React.FC = () => {
-  const navigate = useNavigate();
+  const { leaveQueue } = useGame();
+
+  useEffect(() => {
+    // The game context will handle joining the queue automatically
+    // when the component mounts and the state is "loading" with multiplayer mode
+  }, []);
 
   const handleBack = () => {
-    navigate("/mode");
+    leaveQueue();
+    // The game context will handle navigation back to mode selection
   };
 
   return (

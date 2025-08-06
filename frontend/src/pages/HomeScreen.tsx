@@ -1,18 +1,22 @@
 import React from "react";
 import { Box, Button, Typography, Stack } from "@mui/material";
 import { SignInButton, useAuth } from "@clerk/clerk-react";
-import { useNavigate } from "react-router-dom";
+import { useGame } from "../games/player-rush/context/GameContext";
 
 const HomeScreen: React.FC = () => {
   const { isSignedIn } = useAuth();
-  const navigate = useNavigate();
+  const { send } = useGame();
 
   const handlePlay = () => {
-    navigate("/mode");
+    send({ type: "PLAY" });
   };
 
   const handleHowToPlay = () => {
-    navigate("/how-to-play");
+    send({ type: "HOW_TO_PLAY" });
+  };
+
+  const handleViewProfile = () => {
+    send({ type: "VIEW_PROFILE" });
   };
 
   return (
@@ -54,6 +58,16 @@ const HomeScreen: React.FC = () => {
         >
           How to Play
         </Button>
+        {isSignedIn && (
+          <Button
+            variant="text"
+            color="inherit"
+            size="medium"
+            onClick={handleViewProfile}
+          >
+            View Profile
+          </Button>
+        )}
       </Stack>
     </Box>
   );

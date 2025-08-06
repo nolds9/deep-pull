@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import {
   Box,
   Button,
@@ -7,15 +7,10 @@ import {
   ToggleButton,
   ToggleButtonGroup,
 } from "@mui/material";
-import { useNavigate } from "react-router-dom";
-import type {
-  GameMode,
-  Difficulty,
-} from "../games/player-rush/state/gameMachine";
+import type { ToggleButtonProps } from "@mui/material";
+import { useGame } from "../games/player-rush/context/GameContext";
 
-const StyledToggleButton = (
-  props: React.ComponentProps<typeof ToggleButton>
-) => (
+const StyledToggleButton = (props: ToggleButtonProps) => (
   <ToggleButton
     {...props}
     sx={{
@@ -31,13 +26,12 @@ const StyledToggleButton = (
 );
 
 const ModeScreen: React.FC = () => {
-  const navigate = useNavigate();
-  const [mode, setMode] = useState<GameMode>("single");
-  const [difficulty, setDifficulty] = useState<Difficulty>("easy");
+  const { mode, difficulty, setMode, setDifficulty, startGame, joinQueue } =
+    useGame();
 
   const handleModeChange = (
-    event: React.MouseEvent<HTMLElement>,
-    newMode: GameMode | null
+    _event: React.MouseEvent<HTMLElement>,
+    newMode: typeof mode | null
   ) => {
     if (newMode !== null) {
       setMode(newMode);
@@ -45,8 +39,8 @@ const ModeScreen: React.FC = () => {
   };
 
   const handleDifficultyChange = (
-    event: React.MouseEvent<HTMLElement>,
-    newDifficulty: Difficulty | null
+    _event: React.MouseEvent<HTMLElement>,
+    newDifficulty: typeof difficulty | null
   ) => {
     if (newDifficulty !== null) {
       setDifficulty(newDifficulty);
@@ -54,12 +48,14 @@ const ModeScreen: React.FC = () => {
   };
 
   const handleStart = () => {
-    // For now, just navigate to queue - we'll implement game logic later
-    navigate("/queue");
+    startGame();
+    if (mode === "multiplayer") {
+      joinQueue();
+    }
   };
 
   const handleBack = () => {
-    navigate("/");
+    // The navigation will be handled by the game context
   };
 
   return (

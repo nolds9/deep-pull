@@ -1,12 +1,12 @@
 import React from "react";
 import { Box, Button, Typography, Stack } from "@mui/material";
-import { useNavigate } from "react-router-dom";
+import { useGame } from "../games/player-rush/context/GameContext";
 
 const HowToPlayScreen: React.FC = () => {
-  const navigate = useNavigate();
+  const { send } = useGame();
 
   const handleBack = () => {
-    navigate("/");
+    send({ type: "BACK" });
   };
 
   return (
