@@ -1,0 +1,248 @@
+---
+description: Frontend State Management and Game State
+alwaysApply: false
+---
+
+# Architecture Rules
+
+This document outlines the architectural rules and patterns that must be followed to maintain code quality and consistency across the platform.
+
+## 🎯 State Management Separation
+
+### Rule: Navigation and Game State Must Be Separated
+
+**What**: Navigation state and game state must be handled by different systems.
+
+**Why**: Mixing navigation logic with game state creates complex, hard-to-maintain code that's difficult to extend.
+
+**How**:
+
+- ✅ Use **React Router** for all navigation and routing
+- ✅ Use **XState** only for game-specific state and logic
+- ❌ Never use XState for navigation decisions
+- ❌ Never mix navigation events with game events in state machines
+
+### Implementation Pattern
+
+```typescript
+// ✅ CORRECT: Separate concerns
+// Platform Context - handles navigation
+const PlatformProvider = ({ children }) => {
+  const navigate = useNavigate();
+  const navigateToGame = (game: GameType) => {
+    navigate(`/games/${game}`);
+  };
+  // ...
+};
+
+// Game Context - handles only game state
+const GameProvider = ({ children }) => {
+  const [state, send] = useMachine(gameMachine);
+  // Only game logic: idle, loading, lobby, game, finished
+  // ...
+};
+```
+
+```typescript
+// ❌ INCORRECT: Mixed concerns
+const gameMachine = createMachine({
+  states: {
+    home: { on: { PLAY: "modeSelection" } }, // Navigation in XState
+    profile: { on: { BACK: "home" } }, // Navigation in XState
+    game: {
+      /* game logic */
+    }, // Game logic mixed with nav
+  },
+});
+```
+
+## 🏗️ Directory Structure Rules
+
+### Rule: Follow Established Module Structure
+
+**What**: All games must follow the established directory structure.
+
+**Why**: Consistent structure makes the codebase predictable and easier to navigate.
+
+**Required Structure**:
+
+```
+games/
+└── [game-name]/
+    ├── components/     # Game-specific UI components
+    ├── context/        # Game context provider
+    ├── screens/        # Game screens
+    ├── state/          # XState machine
+    └── types.ts        # Game-specific types
+```
+
+### Rule: Shared vs Game-Specific Code
+
+**What**: Clear separation between shared platform code and game-specific code.
+
+**Where to put code**:
+
+- **Shared**: `src/components/`, `src/hooks/`, `src/services/`
+- **Game-specific**: `src/games/[game-name]/components/`
+- **Platform-level**: `src/pages/`, `src/layouts/`
+
+## 🔄 Router Structure Rules
+
+### Rule: Nested Routing for Games
+
+**What**: Games must use nested routing under `/games/[game-name]/`.
+
+**Why**: Provides clean URL structure and logical organization.
+
+**Pattern**:
+
+```typescript
+{
+  path: "/games/player-rush",
+  element: <GameProvider><Outlet /></GameProvider>,
+  children: [
+    { path: "/", element: <ModeScreen /> },
+    { path: "/game", element: <GameScreen /> },
+    { path: "/lobby", element: <LobbyScreen /> },
+  ],
+}
+```
+
+## 🎮 Game State Machine Rules
+
+### Rule: Pure Game Logic Only
+
+**What**: XState machines must contain only game-specific state and logic.
+
+**Allowed States**:
+
+- `idle` - Game not started
+- `loading` - Game loading/connecting
+- `lobby` - Multiplayer lobby
+- `countdown` - Game countdown
+- `game` - Active gameplay
+- `finished` - Game completed
+
+**Forbidden States**:
+
+- `home`, `profile`, `howto` - These belong in React Router
+- Any navigation-related states
+
+### Rule: Game Events Only
+
+**What**: XState events must be game-specific only.
+
+**Allowed Events**:
+
+- `SET_MODE`, `SET_DIFFICULTY`
+- `START_GAME`, `GAME_START`, `GAME_END`
+- `READY_UP`, `OPPONENT_READY`
+- `TIMER_TICK`, `STOPWATCH_TICK`
+
+**Forbidden Events**:
+
+- `PLAY`, `HOME`, `BACK`, `HOW_TO_PLAY` - These belong in React Router
+
+## 🎨 Component Rules
+
+### Rule: Navigation in Components
+
+**What**: Components should use React Router hooks for navigation.
+
+**Pattern**:
+
+```typescript
+// ✅ CORRECT
+const MyComponent = () => {
+  const navigate = useNavigate();
+  const handleBack = () => navigate("/");
+  // ...
+};
+
+// ❌ INCORRECT
+const MyComponent = () => {
+  const { send } = useGame();
+  const handleBack = () => send({ type: "BACK" });
+  // ...
+};
+```
+
+## 🧪 Testing Rules
+
+### Rule: Test Separation
+
+**What**: Tests must respect the separation of concerns.
+
+**Testing Strategy**:
+
+- **Navigation tests**: Test React Router behavior
+- **Game logic tests**: Test XState machines in isolation
+- **Integration tests**: Test complete user flows
+
+## 📋 Code Review Checklist
+
+When reviewing code, ensure:
+
+- [ ] No navigation logic in XState machines
+- [ ] No game logic in React Router
+- [ ] Proper directory structure followed
+- [ ] Components use React Router for navigation
+- [ ] Game state machines are pure and focused
+- [ ] Context providers have clear responsibilities
+- [ ] No mixed concerns in any single file
+
+## 🚨 Common Anti-Patterns
+
+### Anti-Pattern 1: Navigation in State Machine
+
+```typescript
+// ❌ DON'T DO THIS
+const gameMachine = createMachine({
+  states: {
+    home: { on: { PLAY: "modeSelection" } },
+    modeSelection: { on: { BACK: "home" } },
+  },
+});
+```
+
+### Anti-Pattern 2: Game Logic in Router
+
+```typescript
+// ❌ DON'T DO THIS
+const router = createBrowserRouter([
+  {
+    path: "/game",
+    element: <GameScreen />,
+    loader: async () => {
+      // Game logic in router
+      const gameData = await startGame();
+      return gameData;
+    },
+  },
+]);
+```
+
+### Anti-Pattern 3: Mixed Context
+
+```typescript
+// ❌ DON'T DO THIS
+const GameContext = createContext({
+  // Game state
+  gameState: {},
+  // Navigation state (should be separate)
+  currentRoute: "/",
+  navigate: () => {},
+});
+```
+
+## 🔄 Migration Enforcement
+
+When migrating existing code:
+
+1. **Identify mixed concerns** - Look for navigation in game state
+2. **Extract navigation** - Move to React Router
+3. **Simplify state machines** - Remove navigation states/events
+4. **Update components** - Use React Router hooks
+5. **Test thoroughly** - Ensure all flows work correctly
+
+Following these rules ensures a maintainable, scalable, and clean codebase that's easy to extend with new games and features.

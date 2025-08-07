@@ -1,14 +1,14 @@
 import React from "react";
 import { Box, Button, Typography, Stack, Paper } from "@mui/material";
 import { useUser } from "@clerk/clerk-react";
-import { useGame } from "../games/player-rush/context/GameContext";
+import { useNavigate } from "react-router-dom";
 
 const ProfileScreen: React.FC = () => {
   const { user } = useUser();
-  const { send } = useGame();
+  const navigate = useNavigate();
 
   const handleBack = () => {
-    send({ type: "BACK" });
+    navigate("/");
   };
 
   return (

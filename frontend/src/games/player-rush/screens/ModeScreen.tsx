@@ -8,6 +8,7 @@ import {
   ToggleButtonGroup,
 } from "@mui/material";
 import type { ToggleButtonProps } from "@mui/material";
+import { useNavigate } from "react-router-dom";
 import { useGame } from "../context/GameContext";
 
 const StyledToggleButton = (props: ToggleButtonProps) => (
@@ -26,6 +27,7 @@ const StyledToggleButton = (props: ToggleButtonProps) => (
 );
 
 const ModeScreen: React.FC = () => {
+  const navigate = useNavigate();
   const { mode, difficulty, setMode, setDifficulty, startGame, joinQueue } =
     useGame();
 
@@ -51,11 +53,14 @@ const ModeScreen: React.FC = () => {
     startGame();
     if (mode === "multiplayer") {
       joinQueue();
+      navigate("/games/player-rush/queue");
+    } else {
+      navigate("/games/player-rush/loading");
     }
   };
 
   const handleBack = () => {
-    // The navigation will be handled by the game context
+    navigate("/");
   };
 
   return (

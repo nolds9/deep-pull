@@ -25,15 +25,9 @@ export interface GameContext {
 }
 
 export type GameEvent =
-  | { type: "PLAY" }
-  | { type: "HOW_TO_PLAY" }
-  | { type: "VIEW_PROFILE" }
-  | { type: "BACK" }
   | { type: "SET_MODE"; mode: GameMode }
   | { type: "SET_DIFFICULTY"; difficulty: Difficulty }
   | { type: "START_GAME" }
-  | { type: "START_TIMER" }
-  | { type: "START_STOPWATCH" }
   | {
       type: "GAME_START";
       data: {
@@ -64,7 +58,7 @@ export type GameEvent =
   | { type: "TIMER_TICK" }
   | { type: "STOPWATCH_TICK" }
   | { type: "PLAY_AGAIN" }
-  | { type: "HOME" };
+  | { type: "RESET" };
 
 const gameTimerActor = fromCallback<GameEvent>(({ sendBack }) => {
   const interval = setInterval(() => {
@@ -82,7 +76,7 @@ const stopwatchActor = fromCallback<GameEvent>(({ sendBack }) => {
 
 export const gameMachine = createMachine(
   {
-    id: "game",
+    id: "playerRushGame",
     types: {} as {
       context: GameContext;
       events: GameEvent;
@@ -98,21 +92,9 @@ export const gameMachine = createMachine(
       mode: "single",
       difficulty: "easy",
     },
-    initial: "home",
+    initial: "idle",
     states: {
-      home: {
-        on: {
-          PLAY: "modeSelection",
-          HOW_TO_PLAY: "howto",
-          VIEW_PROFILE: "profile",
-        },
-      },
-      profile: {
-        on: {
-          BACK: "home",
-        },
-      },
-      modeSelection: {
+      idle: {
         on: {
           SET_MODE: {
             actions: assign({
@@ -125,11 +107,9 @@ export const gameMachine = createMachine(
             }),
           },
           START_GAME: "loading",
-          BACK: "home",
         },
       },
       loading: {
-        // In multiplayer, this is the queue. In single player, it's a brief loading state.
         on: {
           GAME_START: [
             {
@@ -156,10 +136,6 @@ export const gameMachine = createMachine(
               }),
             },
           ],
-          BACK: {
-            target: "home",
-            // also need to emit leaveQueue if we were in multiplayer
-          },
         },
       },
       lobby: {
@@ -214,7 +190,7 @@ export const gameMachine = createMachine(
         }),
         on: {
           GAME_END: {
-            target: "end",
+            target: "finished",
             actions: assign({
               winnerId: ({ event }) => event.data.winnerId || undefined,
               winningPath: ({ event }) => event.data.winningPath,
@@ -225,11 +201,23 @@ export const gameMachine = createMachine(
           },
         },
       },
-      end: {
+      finished: {
         entry: [stop("gameTimer"), stop("stopwatch")],
         on: {
           PLAY_AGAIN: {
-            target: "modeSelection",
+            target: "idle",
+            actions: assign({
+              myReady: false,
+              opponentReady: false,
+              winnerId: undefined,
+              winningPath: undefined,
+              solutionPaths: undefined,
+              score: 0,
+              reason: undefined,
+            }),
+          },
+          RESET: {
+            target: "idle",
             actions: assign({
               myReady: false,
               opponentReady: false,
@@ -242,25 +230,6 @@ export const gameMachine = createMachine(
               reason: undefined,
             }),
           },
-          HOME: {
-            target: "home",
-            actions: assign({
-              myReady: false,
-              opponentReady: false,
-              winnerId: undefined,
-              winningPath: undefined,
-              solutionPaths: undefined,
-              score: 0,
-              mode: "single",
-              difficulty: "easy",
-              reason: undefined,
-            }),
-          },
-        },
-      },
-      howto: {
-        on: {
-          BACK: "home",
         },
       },
     },

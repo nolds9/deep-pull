@@ -1,18 +1,22 @@
 import React from "react";
 import { Box, Button, Typography, Stack, Paper, Chip } from "@mui/material";
 import { motion } from "motion/react";
+import { useNavigate } from "react-router-dom";
 import { useGame } from "../context/GameContext";
 
 const EndGameScreen: React.FC = () => {
-  const { state, send } = useGame();
+  const navigate = useNavigate();
+  const { state, resetGame } = useGame();
   const { winnerId, winningPath, solutionPaths, score, reason } = state.context;
 
   const handlePlayAgain = () => {
-    send({ type: "PLAY_AGAIN" });
+    resetGame();
+    navigate("/games/player-rush");
   };
 
   const handleHome = () => {
-    send({ type: "HOME" });
+    resetGame();
+    navigate("/");
   };
 
   const getGameResultMessage = () => {

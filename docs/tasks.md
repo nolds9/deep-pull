@@ -25,6 +25,13 @@ The goal is to implement the modular structure defined in `frontend_architecture
   - [x] Refactor `App.tsx` to use `react-router-dom` for navigation.
   - [x] Implement a `MainLayout` component.
   - [x] Remove the monolithic state-switching logic in favor of routing.
+- [x] **Architectural Separation**:
+  - [x] Separate navigation state from game state management.
+  - [x] Create `PlatformContext` for game selection and shared state.
+  - [x] Simplify XState machines to handle only game logic.
+  - [x] Update all components to use React Router for navigation.
+  - [x] Implement nested routing structure under `/games/[game-name]/`.
+  - [x] Create comprehensive architecture documentation and rules.
 
 ## 🏗️ Backend Platform Enhancements
 

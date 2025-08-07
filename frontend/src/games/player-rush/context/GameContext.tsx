@@ -23,6 +23,7 @@ interface GameContextType {
   submitPath: (path: string[]) => void;
   playerReady: () => void;
   giveUp: () => void;
+  resetGame: () => void;
 }
 
 const GameContext = createContext<GameContextType | null>(null);
@@ -59,7 +60,7 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
   // Track the last logged state to prevent duplicate logs
   const lastLoggedState = useRef<string | null>(null);
 
-  // Navigation effects based on game state
+  // Log state changes for debugging
   useEffect(() => {
     const currentState = state.value;
     const stateString =
@@ -75,80 +76,9 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
         "context:",
         state.context
       );
-      console.log("State type:", typeof currentState);
-      console.log("State string:", stateString);
       lastLoggedState.current = stateString;
     }
-
-    // Handle both string states and compound states
-    if (typeof currentState === "string") {
-      switch (currentState) {
-        case "home":
-          if (window.location.pathname !== "/") {
-            navigate("/");
-          }
-          break;
-        case "modeSelection":
-          if (window.location.pathname !== "/mode") {
-            navigate("/mode");
-          }
-          break;
-        case "loading":
-          if (state.context.mode === "multiplayer") {
-            if (window.location.pathname !== "/queue") {
-              navigate("/queue");
-            }
-          } else {
-            if (window.location.pathname !== "/loading") {
-              navigate("/loading");
-            }
-          }
-          break;
-        case "lobby":
-          if (window.location.pathname !== "/lobby") {
-            navigate("/lobby");
-          }
-          break;
-        case "end":
-          if (window.location.pathname !== "/end-game") {
-            navigate("/end-game");
-          }
-          break;
-        case "howto":
-          if (window.location.pathname !== "/how-to-play") {
-            navigate("/how-to-play");
-          }
-          break;
-        case "profile":
-          if (window.location.pathname !== "/profile") {
-            navigate("/profile");
-          }
-          break;
-        case "countdown":
-          console.log("Navigation: Navigating to /countdown");
-          console.log(
-            "Navigation: Current URL before navigation:",
-            window.location.pathname
-          );
-          if (window.location.pathname !== "/countdown") {
-            navigate("/countdown");
-            console.log("Navigation: Navigate function called");
-          }
-          break;
-      }
-    } else if (typeof currentState === "object" && currentState !== null) {
-      // Handle compound states
-      if ("game" in currentState) {
-        if (window.location.pathname !== "/game") {
-          navigate("/game");
-        }
-      } else if ("countdown" in currentState) {
-        if (window.location.pathname !== "/countdown") {
-          navigate("/countdown");
-        }
-      }
-    }
-  }, [state.value, state.context, navigate, state.context.mode]);
+  }, [state.value, state.context]);
 
   // Socket event handlers
   useEffect(() => {
@@ -156,10 +86,6 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
 
     const handleGameStart = (data: unknown) => {
       console.log("Received gameStart event:", data);
-      console.log(
-        "Current state machine state before transition:",
-        state.value
-      );
       const gameData = data as {
         sessionId: string;
         startPlayer: Player;
@@ -206,8 +132,8 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
     const handleGameCreationError = (data: unknown) => {
       const errorData = data as { message: string };
       console.error("Game creation error:", errorData.message);
-      // Navigate back to mode selection
-      navigate("/mode");
+      // Navigate back to game selection
+      navigate("/games/player-rush");
     };
 
     socket.on("gameStart", handleGameStart);
@@ -242,8 +168,6 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
 
     // For single player games, we need to call the backend to start a game
     if (state.context.mode === "single" && socket && state.context.difficulty) {
-      // Call the backend to start a single player game
-      // The backend will emit a gameStart event when the game is ready
       console.log(
         "Starting single player game with difficulty:",
         state.context.difficulty
@@ -282,6 +206,10 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
     }
   };
 
+  const resetGame = () => {
+    send({ type: "RESET" });
+  };
+
   const contextValue: GameContextType = {
     state,
     send,
@@ -295,6 +223,7 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
     submitPath,
     playerReady,
     giveUp,
+    resetGame,
   };
 
   return (
