@@ -170,9 +170,6 @@ export const gameMachine = createMachine(
         },
       },
       countdown: {
-        after: {
-          3000: { target: "game" },
-        },
         on: {
           COUNTDOWN_DONE: "game",
         },

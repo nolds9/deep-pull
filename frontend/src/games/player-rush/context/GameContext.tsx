@@ -45,6 +45,7 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
     socket,
     joinQueue: socketJoinQueue,
     leaveQueue: socketLeaveQueue,
+    startSinglePlayerGame: socketStartSinglePlayerGame,
     submitPath: socketSubmitPath,
     playerReady: socketPlayerReady,
     giveUp: socketGiveUp,
@@ -55,47 +56,110 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
   const socketRef = useRef(socket);
   socketRef.current = socket;
 
+  // Track the last logged state to prevent duplicate logs
+  const lastLoggedState = useRef<string | null>(null);
+
   // Navigation effects based on game state
   useEffect(() => {
     const currentState = state.value;
+    const stateString =
+      typeof currentState === "string"
+        ? currentState
+        : JSON.stringify(currentState);
 
+    // Only log if the state has actually changed
+    if (lastLoggedState.current !== stateString) {
+      console.log(
+        "Game state changed to:",
+        currentState,
+        "context:",
+        state.context
+      );
+      console.log("State type:", typeof currentState);
+      console.log("State string:", stateString);
+      lastLoggedState.current = stateString;
+    }
+
+    // Handle both string states and compound states
     if (typeof currentState === "string") {
       switch (currentState) {
         case "home":
-          navigate("/");
+          if (window.location.pathname !== "/") {
+            navigate("/");
+          }
           break;
         case "modeSelection":
-          navigate("/mode");
+          if (window.location.pathname !== "/mode") {
+            navigate("/mode");
+          }
           break;
         case "loading":
           if (state.context.mode === "multiplayer") {
-            navigate("/queue");
+            if (window.location.pathname !== "/queue") {
+              navigate("/queue");
+            }
+          } else {
+            if (window.location.pathname !== "/loading") {
+              navigate("/loading");
+            }
           }
           break;
         case "lobby":
-          navigate("/lobby");
-          break;
-        case "game":
-          navigate("/game");
+          if (window.location.pathname !== "/lobby") {
+            navigate("/lobby");
+          }
           break;
         case "end":
-          navigate("/end-game");
+          if (window.location.pathname !== "/end-game") {
+            navigate("/end-game");
+          }
           break;
         case "howto":
-          navigate("/how-to-play");
+          if (window.location.pathname !== "/how-to-play") {
+            navigate("/how-to-play");
+          }
           break;
         case "profile":
-          navigate("/profile");
+          if (window.location.pathname !== "/profile") {
+            navigate("/profile");
+          }
+          break;
+        case "countdown":
+          console.log("Navigation: Navigating to /countdown");
+          console.log(
+            "Navigation: Current URL before navigation:",
+            window.location.pathname
+          );
+          if (window.location.pathname !== "/countdown") {
+            navigate("/countdown");
+            console.log("Navigation: Navigate function called");
+          }
           break;
       }
+    } else if (typeof currentState === "object" && currentState !== null) {
+      // Handle compound states
+      if ("game" in currentState) {
+        if (window.location.pathname !== "/game") {
+          navigate("/game");
+        }
+      } else if ("countdown" in currentState) {
+        if (window.location.pathname !== "/countdown") {
+          navigate("/countdown");
+        }
+      }
     }
-  }, [state.value, navigate, state.context.mode]);
+  }, [state.value, state.context, navigate, state.context.mode]);
 
   // Socket event handlers
   useEffect(() => {
     if (!socket) return;
 
     const handleGameStart = (data: unknown) => {
+      console.log("Received gameStart event:", data);
+      console.log(
+        "Current state machine state before transition:",
+        state.value
+      );
       const gameData = data as {
         sessionId: string;
         startPlayer: Player;
@@ -106,6 +170,7 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
         strikes: number;
         maxStrikes: number;
       };
+      console.log("Sending GAME_START to state machine with data:", gameData);
       send({ type: "GAME_START", data: gameData });
     };
 
@@ -174,6 +239,17 @@ export const GameProvider: React.FC<GameProviderProps> = ({ children }) => {
 
   const startGame = () => {
     send({ type: "START_GAME" });
+
+    // For single player games, we need to call the backend to start a game
+    if (state.context.mode === "single" && socket && state.context.difficulty) {
+      // Call the backend to start a single player game
+      // The backend will emit a gameStart event when the game is ready
+      console.log(
+        "Starting single player game with difficulty:",
+        state.context.difficulty
+      );
+      socketStartSinglePlayerGame(state.context.difficulty);
+    }
   };
 
   const joinQueue = () => {

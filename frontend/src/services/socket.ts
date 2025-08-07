@@ -20,18 +20,50 @@ class SocketService {
   private authToken: string | null = null;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
+  private isConnecting = false;
+  private connectionPromise: Promise<Socket<SocketEvents> | null> | null = null;
 
-  connect(token: string): Socket<SocketEvents> {
+  connect(token: string): Socket<SocketEvents> | null {
+    // If already connected with the same token, return existing socket
+    if (this.socket && this.socket.connected && this.authToken === token) {
+      console.log(
+        "Socket already connected with same token, returning existing socket"
+      );
+      return this.socket;
+    }
+
+    // If connecting, return the existing promise
+    if (this.isConnecting && this.connectionPromise) {
+      console.log(
+        "Socket connection already in progress, returning existing promise"
+      );
+      return this.socket;
+    }
+
+    // If we have a socket but it's not connected, disconnect it first
+    if (this.socket && !this.socket.connected) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+
+    this.isConnecting = true;
     this.authToken = token;
 
-    this.socket = io(SERVER_URL, {
-      transports: ["websocket"],
-      auth: (cb) => {
-        cb({ token });
-      },
+    this.connectionPromise = new Promise((resolve) => {
+      this.socket = io(SERVER_URL, {
+        transports: ["websocket"],
+        auth: (cb) => {
+          cb({ token });
+        },
+      });
+
+      this.setupEventHandlers();
+
+      // Resolve immediately for synchronous access
+      resolve(this.socket);
     });
 
-    this.setupEventHandlers();
+    this.isConnecting = false;
     return this.socket;
   }
 
@@ -41,10 +73,14 @@ class SocketService {
     this.socket.on("connect", () => {
       console.log("Socket connected:", this.socket?.id);
       this.reconnectAttempts = 0;
+      this.isConnecting = false;
+      this.connectionPromise = null;
     });
 
     this.socket.on("disconnect", (reason) => {
       console.log("Socket disconnected:", reason);
+      this.isConnecting = false;
+      this.connectionPromise = null;
       if (reason === "io server disconnect") {
         // Server disconnected us, try to reconnect
         this.socket?.connect();
@@ -53,6 +89,8 @@ class SocketService {
 
     this.socket.on("connect_error", (error) => {
       console.error("Socket connection error:", error);
+      this.isConnecting = false;
+      this.connectionPromise = null;
       this.handleConnectionError();
     });
   }
@@ -83,6 +121,8 @@ class SocketService {
     }
     this.authToken = null;
     this.reconnectAttempts = 0;
+    this.isConnecting = false;
+    this.connectionPromise = null;
   }
 
   getSocket(): Socket<SocketEvents> | null {
@@ -105,6 +145,13 @@ class SocketService {
     if (this.socket) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this.socket as any).emit("leaveQueue");
+    }
+  }
+
+  startSinglePlayerGame(difficulty: string) {
+    if (this.socket) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this.socket as any).emit("startSinglePlayerGame", { difficulty });
     }
   }
 
